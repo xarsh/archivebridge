@@ -1,10 +1,11 @@
 # ArchiveBridge
 
 ArchiveBridge is an interoperability layer for saved web page archive
-formats: **MHTML/MHT** and **Safari WebArchive** (`.webarchive`). It reads
-and writes both formats, converts between them, and exposes that through a
-CLI and a browser extension — all built on a shared, format-independent
-archive model.
+formats: **MHTML/MHT** and **Safari WebArchive** (`.webarchive`). MHTML is
+its canonical format — WebArchive converts to and from MHTML directly,
+with no shared intermediate model in between. It reads and writes both
+formats, converts between them, and exposes that through a CLI and a
+browser extension.
 
 > **Status: early but functional.** Reading, writing, and converting
 > between MHTML and Safari WebArchive are implemented for single-document
@@ -18,8 +19,8 @@ archive model.
 - Read and write Safari WebArchive
 - Convert between archive formats
 - `inspect` / `convert` / `extract` from a CLI
-- The same functionality from a browser extension (Firefox first, then
-  Chrome/Chromium from the same codebase)
+- The same functionality from a browser extension targeting Chrome,
+  Edge, Firefox, and Safari
 - Tolerate real-world broken/incomplete archives without all-or-nothing
   failures
 - No unnecessary network access while inspecting an archive
@@ -29,7 +30,7 @@ archive model.
 
 ```
 archivebridge/
-├── apps/extension/          # Browser extension (Firefox first)
+├── apps/extension/          # Browser extension (Chrome, Edge, Firefox, Safari)
 ├── packages/archivebridge/  # @xarsh/archivebridge — library + CLI
 ├── fixtures/                 # Shared test fixtures
 ├── docs/                     # Design docs
