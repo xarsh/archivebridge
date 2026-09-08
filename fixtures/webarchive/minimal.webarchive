@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WebMainResource</key>
+	<dict>
+		<key>WebResourceData</key>
+		<data>
+		PGh0bWw+PGhlYWQ+PHRpdGxlPkV4YW1wbGU8L3RpdGxlPjwvaGVhZD48Ym9keT48cD5N
+		aW5pbWFsIHN5bnRoZXRpYyBXZWJBcmNoaXZlIGZpeHR1cmUgZm9yIEFyY2hpdmVCcmlk
+		Z2UgdGVzdHMuPC9wPjwvYm9keT48L2h0bWw+
+		</data>
+		<key>WebResourceMIMEType</key>
+		<string>text/html</string>
+		<key>WebResourceTextEncodingName</key>
+		<string>UTF-8</string>
+		<key>WebResourceURL</key>
+		<string>https://example.invalid/</string>
+	</dict>
+	<key>WebSubresources</key>
+	<array/>
+</dict>
+</plist>

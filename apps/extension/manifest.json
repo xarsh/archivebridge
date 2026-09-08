@@ -1,0 +1,16 @@
+{
+	"manifest_version": 3,
+	"name": "ArchiveBridge",
+	"version": "0.0.1",
+	"description": "Inspect saved web page archives (MHTML, WebArchive) in your browser.",
+	"browser_specific_settings": {
+		"gecko": {
+			"id": "archivebridge@xar.sh",
+			"strict_min_version": "109.0"
+		}
+	},
+	"action": {
+		"default_popup": "popup.html",
+		"default_title": "ArchiveBridge"
+	}
+}

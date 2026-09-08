@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>ArchiveBridge</title>
+		<style>
+			body {
+				width: 320px;
+				font: 13px system-ui, sans-serif;
+				margin: 0;
+				padding: 12px;
+			}
+			h1 {
+				font-size: 14px;
+				margin: 0 0 8px;
+			}
+			#drop-zone {
+				border: 2px dashed #888;
+				border-radius: 6px;
+				padding: 24px 12px;
+				text-align: center;
+				color: #555;
+			}
+			#drop-zone.drag-over {
+				border-color: #0060df;
+				color: #0060df;
+			}
+			label[for="file-input"] {
+				color: #0060df;
+				text-decoration: underline;
+				cursor: pointer;
+			}
+			#file-list {
+				margin: 8px 0 0;
+				padding: 0;
+				list-style: none;
+				font-family: monospace;
+				word-break: break-all;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>ArchiveBridge</h1>
+		<div id="drop-zone">
+			Drop or
+			<label for="file-input">select</label>
+			a file:
+			<div>.mhtml &middot; .mht &middot; .webarchive</div>
+			<input id="file-input" type="file" accept=".mhtml,.mht,.webarchive" hidden />
+		</div>
+		<ul id="file-list"></ul>
+		<script type="module" src="./dist/popup.js"></script>
+	</body>
+</html>

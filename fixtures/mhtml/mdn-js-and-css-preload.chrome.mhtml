@@ -1,0 +1,56 @@
+From: <Saved by Blink>
+Snapshot-Content-Location: https://mdn.github.io/html-examples/link-rel-preload/js-and-css/
+Subject: JS and CSS preload example
+Date: Tue, 8 Sep 2026 15:15:52 +0900
+MIME-Version: 1.0
+Content-Type: multipart/related;
+	type="text/html";
+	boundary="----MultipartBoundary--pm6kPIwAcUVQJ06NnYrXwfPP8wuOtBKVOOzjxztjfa----"
+
+
+------MultipartBoundary--pm6kPIwAcUVQJ06NnYrXwfPP8wuOtBKVOOzjxztjfa----
+Content-Type: text/html
+Content-ID: <frame-4FD88CE3C11378C4058572DB572A783D@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://mdn.github.io/html-examples/link-rel-preload/js-and-css/
+
+<!DOCTYPE html><html><head><meta http-equiv=3D"Content-Type" content=3D"tex=
+t/html; charset=3DUTF-8">
+   =20
+    <title>JS and CSS preload example</title>
+
+    <link rel=3D"preload" href=3D"https://mdn.github.io/html-examples/link-=
+rel-preload/js-and-css/style.css" as=3D"style">
+    <link rel=3D"preload" href=3D"https://mdn.github.io/html-examples/link-=
+rel-preload/js-and-css/main.js" as=3D"script">
+
+    <link rel=3D"stylesheet" href=3D"https://mdn.github.io/html-examples/li=
+nk-rel-preload/js-and-css/style.css">
+  </head>
+
+  <body>
+    <h1>bouncing balls</h1>
+    <canvas width=3D"1280" height=3D"2043"></canvas>
+
+   =20
+ =20
+
+</body></html>
+------MultipartBoundary--pm6kPIwAcUVQJ06NnYrXwfPP8wuOtBKVOOzjxztjfa----
+Content-Type: text/css
+Content-Transfer-Encoding: quoted-printable
+Content-Location: https://mdn.github.io/html-examples/link-rel-preload/js-and-css/style.css
+
+@charset "utf-8";
+
+html, body { margin: 0px; }
+
+html { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; height:=
+ 100%; }
+
+body { overflow: hidden; height: inherit; }
+
+h1 { font-size: 2rem; letter-spacing: -1px; position: absolute; margin: 0px=
+; top: -4px; right: 5px; color: transparent; text-shadow: white 0px 0px 4px=
+; }
+------MultipartBoundary--pm6kPIwAcUVQJ06NnYrXwfPP8wuOtBKVOOzjxztjfa------
