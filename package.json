@@ -1,0 +1,34 @@
+{
+  "name": "archivebridge",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xarsh/archivebridge.git"
+  },
+  "keywords": [],
+	"author": "Takao Naito <xarsh@outlook.com> (https://xar.sh)",
+  "license": "MIT",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/xarsh/archivebridge/issues"
+  },
+  "homepage": "https://github.com/xarsh/archivebridge#readme",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@types/node": "^26.5.0",
+    "typescript": "^7.0.2"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}
