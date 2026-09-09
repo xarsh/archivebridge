@@ -1,0 +1,49 @@
+From: <Saved by Blink>
+Snapshot-Content-Location: http://127.0.0.1:8091/iframe-nested/
+Subject: iframe-nested-root
+Date: Tue, 8 Sep 2026 21:50:33 +0900
+MIME-Version: 1.0
+Content-Type: multipart/related;
+	type="text/html";
+	boundary="----MultipartBoundary--bRSrHtgkuQVn4dJKGH1zsuapm1NSus8y5uRSjzGSDv----"
+
+
+------MultipartBoundary--bRSrHtgkuQVn4dJKGH1zsuapm1NSus8y5uRSjzGSDv----
+Content-Type: text/html
+Content-ID: <frame-21ADE0C6A0E53AF18DD58901D473BE27@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: http://127.0.0.1:8091/iframe-nested/
+
+<!DOCTYPE html><html><head><meta http-equiv=3D"Content-Type" content=3D"tex=
+t/html; charset=3DUTF-8"><title>iframe-nested-root</title></head>
+<body>
+<h1>root</h1>
+<iframe src=3D"cid:frame-FDE1358B91C8544475AE223384247A59@mhtml.blink" widt=
+h=3D"400" height=3D"300"></iframe>
+
+</body></html>
+------MultipartBoundary--bRSrHtgkuQVn4dJKGH1zsuapm1NSus8y5uRSjzGSDv----
+Content-Type: text/html
+Content-ID: <frame-FDE1358B91C8544475AE223384247A59@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: http://127.0.0.1:8091/iframe-nested/mid.html
+
+<!DOCTYPE html><html><head><meta http-equiv=3D"Content-Type" content=3D"tex=
+t/html; charset=3DUTF-8"><title>iframe-nested-mid</title></head>
+<body>
+<h2>mid frame</h2>
+<iframe src=3D"cid:frame-C2FB8546B5C2839977895F9C5F008A27@mhtml.blink" widt=
+h=3D"300" height=3D"150"></iframe>
+
+</body></html>
+------MultipartBoundary--bRSrHtgkuQVn4dJKGH1zsuapm1NSus8y5uRSjzGSDv----
+Content-Type: text/html
+Content-ID: <frame-C2FB8546B5C2839977895F9C5F008A27@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: http://127.0.0.1:8091/iframe-nested/leaf.html
+
+<!DOCTYPE html><html><head><meta http-equiv=3D"Content-Type" content=3D"tex=
+t/html; charset=3DUTF-8"><title>iframe-nested-leaf</title></head>
+<body><p>leaf frame</p>
+</body></html>
+------MultipartBoundary--bRSrHtgkuQVn4dJKGH1zsuapm1NSus8y5uRSjzGSDv------

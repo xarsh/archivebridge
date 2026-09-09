@@ -42,6 +42,8 @@
 	],
 	"dependencies": {
 		"@exodus/bytes": "^1.15.1",
+		"iconv-lite": "^0.7.3",
+		"parse5": "^8.0.1",
 		"plist": "^5.0.0"
 	},
 	"scripts": {

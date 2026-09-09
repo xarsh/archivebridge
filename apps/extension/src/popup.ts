@@ -1,9 +1,14 @@
 /**
- * Popup UI wiring only. This intentionally does not detect archive format
- * or parse anything: apps/extension has no bundler yet, so it cannot pull
- * in @xarsh/archivebridge without either adding one or duplicating parsing
- * logic here. Neither is acceptable (see docs/architecture.md), so this
- * stays a plain file picker until that's decided.
+ * Popup UI wiring only — the extension is a UI placeholder today (see
+ * docs/architecture.md, "Current state of apps/extension").
+ *
+ * This intentionally does not detect archive format or parse anything:
+ * apps/extension has no bundler, so it cannot import @xarsh/archivebridge
+ * without either adding one or duplicating parsing logic here. Duplicating
+ * it would break CONTRIBUTING.md's boundary rule that the extension must
+ * not reimplement archive parsing, so this stays a plain file picker until
+ * the bundler question is decided — which is what capture/save adapters
+ * will force.
  */
 
 function requireElement<T extends Element>(id: string, ctor: new () => T): T {

@@ -1,0 +1,18 @@
+# Archive fixtures are byte-exact captures: tests assert on their exact bytes
+# (see fixtures/README.md), so Git must neither rewrite them nor mistake a
+# producer's own bytes for a whitespace defect.
+
+# Never apply end-of-line conversion. `fixtures/mhtml/` deliberately holds a
+# mix: the real Chrome captures are CRLF (RFC 2557/2045 line terminators) while
+# `minimal.mhtml` is hand-written LF. A contributor with `core.autocrlf=true`
+# would otherwise have both mangled on checkout, breaking byte-exactness for
+# whichever kind their platform disagrees with.
+fixtures/** -text
+
+# Enable `cr-at-eol` for MHTML fixtures only: a CR immediately before the LF is
+# part of the line terminator, not trailing whitespace, so `git diff --check`
+# and `git apply` stop reporting every line of a real Chrome capture. This adds
+# to Git's default whitespace checks rather than replacing them — a genuine
+# trailing space or tab in these files is still reported, as are all whitespace
+# errors everywhere else in the repository.
+fixtures/mhtml/*.mhtml whitespace=cr-at-eol

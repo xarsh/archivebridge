@@ -1,12 +1,11 @@
 /**
  * Minimal MHTML parser (RFC 2557 `multipart/related`, RFC 2045/2046 MIME).
  *
- * Scope for this initial implementation: a single-level `multipart/related`
- * message whose parts each carry a `Content-Location`. Nested frames
- * (`multipart/mixed` wrapping several `multipart/related` documents,
- * `Content-ID`-addressed parts) are not handled yet; every archive parses
- * with `frames: []`. See docs/architecture.md for the target `Archive`
- * model this feeds into and the diagnostics contract.
+ * Produces an `MhtmlDocument`: a flat, order-preserving list of MIME parts
+ * plus a resolved root index — the direct reflection of what a real MHTML
+ * document is, per docs/architecture.md ("MHTML-native representation").
+ * Frame relationships (`cid:`-linked `<iframe>` parts) are not resolved
+ * here; see `mhtml/frames.ts`.
  *
  * Parsing works on raw bytes throughout, never on a whole-file text decode:
  * MHTML bodies can carry arbitrary 8-bit resource data (a raw/`8bit`
@@ -14,6 +13,15 @@
  * Latin-1 up front is lossy for some byte values. Only genuinely ASCII-safe
  * spans (headers, quoted-printable/base64 bodies, which are ASCII by
  * construction) are ever converted to strings.
+ *
+ * Structural parsing (headers, boundary delimiters) is line-oriented, but a
+ * part's body is *never* reconstructed from those lines: {@link MimeLine}
+ * records keep each line's offsets into the original buffer, and a body is
+ * extracted as one raw span of the source (see {@link rawBody}). Splitting a
+ * message into lines and re-joining them with a canonical terminator would
+ * silently rewrite a body's original CRLFs as LFs — for a `7bit`/`8bit`/
+ * `binary` part that is a byte-level corruption of the resource, and for a
+ * quoted-printable part it changes what its hard line breaks decode to.
  *
  * Base64 decoding is delegated to `@exodus/bytes/base64.js` rather than the
  * platform `Uint8Array.fromBase64`: that method only landed in V8 14 (Node
@@ -23,52 +31,58 @@
  */
 
 import { fromBase64 } from '@exodus/bytes/base64.js'
-import type { Archive, Diagnostic, ParseResult, Resource } from '../model/archive.ts'
+import type { Diagnostic } from '../model/archive.ts'
+import type { MhtmlDocument, MhtmlParseResult, MhtmlPart } from '../model/mhtml.ts'
+import { type ContentType, isValidMediaType, parseContentType } from './mime-header.ts'
 
 const CR = 0x0d
 const LF = 0x0a
 
-/** Splits raw bytes into lines on LF, stripping a trailing CR. Handles both CRLF and LF-only input uniformly. */
-function splitLines(bytes: Uint8Array): Uint8Array[] {
-	const lines: Uint8Array[] = []
+/**
+ * One line of the source message, remembering where it sat in the original
+ * buffer so a body span can be taken from the source bytes directly rather
+ * than rebuilt from line content.
+ */
+interface MimeLine {
+	/** The line's content bytes, excluding its terminator (CRLF or a bare LF). */
+	readonly content: Uint8Array
+	/** Offset of `content`'s first byte within the buffer the line was split from. */
+	readonly start: number
+	/** Offset just past `content`'s last byte — i.e. at this line's terminator, if it has one. */
+	readonly contentEnd: number
+}
+
+/** Splits raw bytes into lines on LF, treating a preceding CR as part of the terminator. Handles both CRLF and LF-only input uniformly. */
+function splitLines(bytes: Uint8Array): MimeLine[] {
+	const lines: MimeLine[] = []
 	let start = 0
 	for (let i = 0; i < bytes.length; i++) {
 		if (bytes[i] === LF) {
-			const end = i > start && bytes[i - 1] === CR ? i - 1 : i
-			lines.push(bytes.subarray(start, end))
+			const contentEnd = i > start && bytes[i - 1] === CR ? i - 1 : i
+			lines.push({ content: bytes.subarray(start, contentEnd), start, contentEnd })
 			start = i + 1
 		}
 	}
-	lines.push(bytes.subarray(start))
+	lines.push({ content: bytes.subarray(start), start, contentEnd: bytes.length })
 	return lines
 }
 
-/** Joins line byte-slices back together with a single LF between each (none trailing), never decoding to text. */
-function joinLines(lines: readonly Uint8Array[]): Uint8Array {
-	if (lines.length === 0) {
+/**
+ * The raw body bytes of one MIME entity: a single span of `source`, from the
+ * first body line's first byte through the last body line's content —
+ * excluding that last line's terminator, because per RFC 2046 the CRLF
+ * immediately preceding a boundary delimiter line belongs to the delimiter,
+ * not to the body part it follows. Every other byte in between, including any
+ * CRLF or bare LF genuinely inside the body, is returned exactly as it
+ * appeared in `source`.
+ */
+function rawBody(source: Uint8Array, lines: readonly MimeLine[], bodyStart: number): Uint8Array {
+	const first = lines[bodyStart]
+	const last = lines[lines.length - 1]
+	if (first === undefined || last === undefined || last.contentEnd <= first.start) {
 		return new Uint8Array(0)
 	}
-
-	let total = lines.length - 1
-	for (const line of lines) {
-		total += line.length
-	}
-
-	const out = new Uint8Array(total)
-	let offset = 0
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]
-		if (line === undefined) {
-			continue
-		}
-		out.set(line, offset)
-		offset += line.length
-		if (i < lines.length - 1) {
-			out[offset] = LF
-			offset += 1
-		}
-	}
-	return out
+	return source.subarray(first.start, last.contentEnd)
 }
 
 // Headers are required by RFC 2045 to be US-ASCII; decoding them as UTF-8 is
@@ -82,19 +96,19 @@ interface HeaderBlock {
 }
 
 /** Parses RFC 2045 headers (with folded continuation lines) starting at `lines[start]`, stopping at the first blank line. */
-function parseHeaders(lines: readonly Uint8Array[], start: number): HeaderBlock {
+function parseHeaders(lines: readonly MimeLine[], start: number): HeaderBlock {
 	const headers = new Map<string, string>()
 	let lastKey: string | undefined
 	let i = start
 
 	for (; i < lines.length; i++) {
 		const line = lines[i]
-		if (line === undefined || line.length === 0) {
+		if (line === undefined || line.content.length === 0) {
 			i += 1
 			break
 		}
 
-		const text = headerDecoder.decode(line)
+		const text = headerDecoder.decode(line.content)
 
 		if ((text.startsWith(' ') || text.startsWith('\t')) && lastKey !== undefined) {
 			headers.set(lastKey, `${headers.get(lastKey)} ${text.trim()}`)
@@ -115,53 +129,6 @@ function parseHeaders(lines: readonly Uint8Array[], start: number): HeaderBlock 
 	return { headers, bodyStart: i }
 }
 
-interface ContentType {
-	readonly type: string
-	readonly params: ReadonlyMap<string, string>
-}
-
-/** Splits a header value on top-level `;` separators, respecting `"quoted"` segments. */
-function splitHeaderParams(value: string): string[] {
-	const parts: string[] = []
-	let current = ''
-	let inQuotes = false
-
-	for (const ch of value) {
-		if (ch === '"') {
-			inQuotes = !inQuotes
-		}
-		if (ch === ';' && !inQuotes) {
-			parts.push(current)
-			current = ''
-			continue
-		}
-		current += ch
-	}
-	parts.push(current)
-	return parts
-}
-
-function parseContentType(value: string): ContentType {
-	const [typeSegment, ...paramSegments] = splitHeaderParams(value)
-	const type = (typeSegment ?? '').trim().toLowerCase()
-	const params = new Map<string, string>()
-
-	for (const segment of paramSegments) {
-		const eq = segment.indexOf('=')
-		if (eq === -1) {
-			continue
-		}
-		const key = segment.slice(0, eq).trim().toLowerCase()
-		let paramValue = segment.slice(eq + 1).trim()
-		if (paramValue.length >= 2 && paramValue.startsWith('"') && paramValue.endsWith('"')) {
-			paramValue = paramValue.slice(1, -1)
-		}
-		params.set(key, paramValue)
-	}
-
-	return { type, params }
-}
-
 type BoundaryLineKind = 'delimiter' | 'close'
 
 /** RFC 2046 boundary lines are ASCII by construction, so only lines that look like one pay for a text decode. */
@@ -179,27 +146,51 @@ function boundaryLineKind(line: Uint8Array, boundary: string): BoundaryLineKind 
 	return undefined
 }
 
-/** Splits the lines making up a `multipart/related` body into per-part line groups, delimited by `boundary`. */
-function splitParts(lines: readonly Uint8Array[], start: number, boundary: string): Uint8Array[][] {
-	const parts: Uint8Array[][] = []
+interface MultipartBody {
+	/** The lines of each collected body part, in document order. Empty when the boundary never opened. */
+	readonly parts: readonly (readonly MimeLine[])[]
+	/** Whether the declared boundary ever appeared as an opening delimiter line (RFC 2046's `dash-boundary`). */
+	readonly opened: boolean
+	/** Whether the closing `--boundary--` delimiter was found. */
+	readonly closed: boolean
+}
+
+/**
+ * Splits the lines making up a `multipart/related` body into per-part line
+ * groups, delimited by `boundary`, reporting whether the opening and closing
+ * delimiters were actually present.
+ *
+ * A boundary that never appears at all yields **no parts**, not one empty
+ * one: RFC 2046's `multipart-body` grammar requires a `dash-boundary` before
+ * the first body part, so with no delimiter anywhere there is no MIME entity
+ * to parse — manufacturing an empty part there would turn an unparseable
+ * envelope into a spurious, valid-looking one-part document.
+ */
+function splitParts(lines: readonly MimeLine[], start: number, boundary: string): MultipartBody {
 	let i = start
+	let opened = false
 
 	// Skip the preamble (ignored per RFC 2046) up to the first delimiter line.
 	for (; i < lines.length; i++) {
 		const line = lines[i]
-		if (line !== undefined && boundaryLineKind(line, boundary) === 'delimiter') {
+		if (line !== undefined && boundaryLineKind(line.content, boundary) === 'delimiter') {
+			opened = true
 			i += 1
 			break
 		}
 	}
+	if (!opened) {
+		return { parts: [], opened: false, closed: false }
+	}
 
-	let current: Uint8Array[] = []
+	const parts: MimeLine[][] = []
+	let current: MimeLine[] = []
 	for (; i < lines.length; i++) {
 		const line = lines[i]
 		if (line === undefined) {
 			continue
 		}
-		const kind = boundaryLineKind(line, boundary)
+		const kind = boundaryLineKind(line.content, boundary)
 		if (kind === 'delimiter') {
 			parts.push(current)
 			current = []
@@ -207,14 +198,14 @@ function splitParts(lines: readonly Uint8Array[], start: number, boundary: strin
 		}
 		if (kind === 'close') {
 			parts.push(current)
-			return parts
+			return { parts, opened: true, closed: true }
 		}
 		current.push(line)
 	}
 
 	// No closing delimiter found; keep whatever was collected as a best-effort last part.
 	parts.push(current)
-	return parts
+	return { parts, opened: true, closed: false }
 }
 
 function hexDigit(byte: number | undefined): number | undefined {
@@ -234,12 +225,15 @@ function hexDigit(byte: number | undefined): number | undefined {
 }
 
 /**
- * Decodes quoted-printable bytes per RFC 2045. Operates on already
- * LF-joined lines, so a soft line break is exactly `=` followed by LF; a
- * bare LF is a real, meaningful line break in the decoded content. A `=`
- * that isn't a valid soft break or `=XX` hex escape is passed through
- * literally rather than treated as fatal, matching the "recover, don't
- * throw" stance for non-conforming input.
+ * Decodes quoted-printable bytes per RFC 2045. Operates on the part's *raw*
+ * body span, so a soft line break is `=` followed by the line terminator in
+ * whichever form the input actually used (CRLF for conforming input, a bare
+ * LF for non-conforming input this reader still tolerates), and a hard line
+ * break is passed through with its original bytes intact — never rewritten
+ * to a canonical terminator the source didn't have. A `=` that isn't a valid
+ * soft break or `=XX` hex escape is passed through literally rather than
+ * treated as fatal, matching the "recover, don't throw" stance for
+ * non-conforming input.
  */
 function decodeQuotedPrintable(bytes: Uint8Array): Uint8Array {
 	const out: number[] = []
@@ -254,6 +248,10 @@ function decodeQuotedPrintable(bytes: Uint8Array): Uint8Array {
 			continue
 		}
 
+		if (bytes[i + 1] === CR && bytes[i + 2] === LF) {
+			i += 2
+			continue
+		}
 		if (bytes[i + 1] === LF) {
 			i += 1
 			continue
@@ -292,12 +290,6 @@ function decodeBase64(bytes: Uint8Array): Uint8Array | undefined {
 const DEFAULT_MIME_TYPE = 'text/plain'
 const DEFAULT_TEXT_ENCODING = 'us-ascii'
 
-interface ParsedPart {
-	readonly resource: Resource
-	/** Raw `Content-ID` header value (still `<...>`-wrapped), if present. Used only to resolve the RFC 2387 `start` parameter; it never leaks into `Resource` (see docs/architecture.md). */
-	readonly contentId: string | undefined
-}
-
 /** Strips the RFC 2392 `<...>` wrapper from a Content-ID / `start` parameter value, if present. */
 function normalizeCid(value: string): string {
 	const trimmed = value.trim()
@@ -307,32 +299,102 @@ function normalizeCid(value: string): string {
 	return trimmed
 }
 
-function parsePart(partLines: readonly Uint8Array[], diagnostics: Diagnostic[]): ParsedPart | undefined {
+interface ResolvedMediaType {
+	readonly mimeType: string
+	/**
+	 * True when RFC 2045 §5.2's default was applied (`Content-Type` absent, or
+	 * present but syntactically invalid) rather than a declared media type
+	 * being honored. The caller needs this because §5.2's default is the whole
+	 * of `text/plain; charset=us-ascii`: when it applies, the charset half
+	 * applies too and any `charset` scraped from the invalid field is dropped —
+	 * see {@link parsePart}.
+	 */
+	readonly defaulted: boolean
+}
+
+/**
+ * Resolves a part's declared media type. RFC 2045 §5.2 makes `text/plain`
+ * the default not only when `Content-Type` is absent but also — as an
+ * explicit recommendation — when the header is present but syntactically
+ * invalid, which is what this does: a media type that isn't a `token "/"
+ * token` (per `mime-header.ts`'s `isValidMediaType`) is recovered to the
+ * default rather than stored verbatim. That keeps the writer's rule that a
+ * `Content-Type` must be emittable (`mhtml/serialize.ts`) from turning
+ * tolerantly-parsed non-conforming input into a document ArchiveBridge can
+ * parse but refuses to write back out.
+ */
+function resolveMediaType(contentType: ContentType | undefined, location: string | undefined, diagnostics: Diagnostic[]): ResolvedMediaType {
+	if (contentType === undefined) {
+		return { mimeType: DEFAULT_MIME_TYPE, defaulted: true }
+	}
+	if (isValidMediaType(contentType.type)) {
+		return { mimeType: contentType.type, defaulted: false }
+	}
+	diagnostics.push({
+		type: 'recovered-non-conforming-input',
+		message: `part ${location === undefined ? '' : `for "${location}" `}declares a syntactically invalid media type ${JSON.stringify(contentType.type)}; defaulted to ${DEFAULT_MIME_TYPE}`,
+	})
+	return { mimeType: DEFAULT_MIME_TYPE, defaulted: true }
+}
+
+/**
+ * Parses one MIME part into an `MhtmlPart`. Neither `Content-Location` nor
+ * `Content-ID` is required for a part to parse successfully — absence of
+ * either is not itself fatal (see docs/architecture.md, `MhtmlPart`'s
+ * `location` field doc); only an unparseable/unsupported body fails a part.
+ *
+ * `source` is the buffer `partLines` were split from: the body is taken as a
+ * raw span of it (see {@link rawBody}) so the resource's own bytes — CRLFs
+ * included — survive parsing untouched.
+ */
+function parsePart(source: Uint8Array, partLines: readonly MimeLine[], diagnostics: Diagnostic[]): MhtmlPart | undefined {
 	const { headers, bodyStart } = parseHeaders(partLines, 0)
 
-	const url = headers.get('content-location')
-	if (url === undefined) {
-		diagnostics.push({ type: 'malformed-resource', message: 'part is missing a Content-Location header' })
-		return undefined
-	}
+	const location = headers.get('content-location')
+	const contentIdHeader = headers.get('content-id')
+	const contentId = contentIdHeader === undefined ? undefined : normalizeCid(contentIdHeader)
 
 	const contentTypeHeader = headers.get('content-type')
 	const contentType = contentTypeHeader === undefined ? undefined : parseContentType(contentTypeHeader)
-	const mimeType = contentType?.type ?? DEFAULT_MIME_TYPE
-	const textEncoding = contentType?.params.get('charset') ?? (contentType === undefined ? DEFAULT_TEXT_ENCODING : undefined)
+	const { mimeType, defaulted } = resolveMediaType(contentType, location, diagnostics)
+	// RFC 2045 §5.2's default is `text/plain; charset=us-ascii` as a *single*
+	// default, recommended both when `Content-Type` is absent and when the
+	// field is syntactically invalid — so it is applied whole, media type and
+	// charset together, and a `charset` parsed out of an invalid field is
+	// discarded rather than salvaged.
+	//
+	// Discarding it is the standards-oriented reading, not just the simpler
+	// one. §5.1's grammar is `content := "Content-Type" ":" type "/" subtype
+	// *(";" parameter)`: the parameters belong to the same production as the
+	// media type, so if `type "/" subtype` doesn't parse, there is no valid
+	// Content-Type field for those parameters to be parameters *of*. Trusting
+	// half of a field already declared invalid would be an ArchiveBridge
+	// tolerant-reader extension with no rule behind it — and §5.2's trigger is
+	// an invalid header *field*, not an invalid media type with usable
+	// parameters. Nothing is corrupted by the loss: the recovered media type is
+	// `text/plain`, and only `text/html` parts are ever decoded and re-encoded
+	// (`convert/to-mhtml.ts`'s `isHtml`, `mhtml/frames.ts`'s `isHtmlMimeType`),
+	// so the charset here is a label carried through, never applied to bytes.
+	//
+	// A *valid* media type with no `charset` stays `undefined` on purpose, even
+	// for `text/plain`: for `text/html` in particular, "no charset declared at
+	// the MIME level" is meaningful information a consumer needs in order to
+	// fall back to the document's own `<meta charset>`, and manufacturing
+	// `us-ascii` there would erase that distinction.
+	const textEncoding = defaulted ? DEFAULT_TEXT_ENCODING : contentType?.params.get('charset')
 
 	const transferEncoding = (headers.get('content-transfer-encoding') ?? '7bit').trim().toLowerCase()
-	const body = partLines.slice(bodyStart)
+	const body = rawBody(source, partLines, bodyStart)
 
 	let data: Uint8Array
 	switch (transferEncoding) {
 		case 'quoted-printable':
-			data = decodeQuotedPrintable(joinLines(body))
+			data = decodeQuotedPrintable(body)
 			break
 		case 'base64': {
-			const decoded = decodeBase64(joinLines(body))
+			const decoded = decodeBase64(body)
 			if (decoded === undefined) {
-				diagnostics.push({ type: 'malformed-resource', url, message: 'invalid base64 body' })
+				diagnostics.push({ type: 'malformed-resource', ...(location !== undefined ? { url: location } : {}), message: 'invalid base64 body' })
 				return undefined
 			}
 			data = decoded
@@ -341,22 +403,16 @@ function parsePart(partLines: readonly Uint8Array[], diagnostics: Diagnostic[]):
 		case '7bit':
 		case '8bit':
 		case 'binary':
-			data = joinLines(body)
+			// Byte-exact: `rawBody` already returned the entity body verbatim, and these
+			// three encodings are identity transforms over it (RFC 2045 §6.2/§6.4).
+			data = body
 			break
 		default:
 			diagnostics.push({ type: 'unsupported-encoding', encoding: transferEncoding })
 			return undefined
 	}
 
-	return {
-		resource: {
-			url,
-			mimeType,
-			data,
-			...(textEncoding !== undefined ? { textEncoding } : {}),
-		},
-		contentId: headers.get('content-id'),
-	}
+	return { contentId, location, mimeType, textEncoding, data }
 }
 
 /**
@@ -372,13 +428,18 @@ function parsePart(partLines: readonly Uint8Array[], diagnostics: Diagnostic[]):
  *    does not write `start`).
  * 3. The first successfully-parsed part.
  *
- * A `start` parameter that doesn't match any part's Content-ID is reported
- * as `recovered-non-conforming-input` and falls through to the next
- * strategy rather than failing the archive.
+ * Both hints are genuinely *hints*: a `start` parameter or a
+ * `Snapshot-Content-Location` that matches no part is reported as
+ * `recovered-non-conforming-input` and falls through to the next strategy
+ * rather than failing the archive. In particular a stale
+ * `Snapshot-Content-Location` — a Blink compatibility mechanism
+ * ArchiveBridge reads but never writes — must not be fatal to an archive
+ * whose first part is perfectly usable. Only having no parts at all leaves
+ * nothing to resolve.
  */
-function findMainPartIndex(parts: readonly ParsedPart[], startCid: string | undefined, declaredMainUrl: string | undefined, diagnostics: Diagnostic[]): number | undefined {
+function findMainPartIndex(parts: readonly MhtmlPart[], startCid: string | undefined, declaredMainUrl: string | undefined, diagnostics: Diagnostic[]): number | undefined {
 	if (startCid !== undefined) {
-		const index = parts.findIndex((part) => part.contentId !== undefined && normalizeCid(part.contentId) === startCid)
+		const index = parts.findIndex((part) => part.contentId === startCid)
 		if (index !== -1) {
 			return index
 		}
@@ -389,22 +450,58 @@ function findMainPartIndex(parts: readonly ParsedPart[], startCid: string | unde
 	}
 
 	if (declaredMainUrl !== undefined) {
-		const index = parts.findIndex((part) => part.resource.url === declaredMainUrl)
-		return index === -1 ? undefined : index
+		const index = parts.findIndex((part) => part.location === declaredMainUrl)
+		if (index !== -1) {
+			return index
+		}
+		diagnostics.push({
+			type: 'recovered-non-conforming-input',
+			message: `Snapshot-Content-Location references unknown Content-Location "${declaredMainUrl}"`,
+		})
 	}
 
 	return parts.length > 0 ? 0 : undefined
 }
 
 /**
- * Parses an MHTML/MHT byte stream into an {@link Archive}. Prefers
+ * Flags duplicate `Content-Location`/`Content-ID` identities across `parts`,
+ * without dropping either part: `MhtmlDocument.parts` is a lossless, direct
+ * reflection of the underlying multipart structure (see
+ * docs/architecture.md), so a duplicate identity is reported, not silently
+ * resolved by discarding data.
+ */
+function checkDuplicateIdentities(parts: readonly MhtmlPart[], diagnostics: Diagnostic[]): void {
+	const seenLocations = new Set<string>()
+	const seenContentIds = new Set<string>()
+	for (const part of parts) {
+		if (part.location !== undefined) {
+			if (seenLocations.has(part.location)) {
+				diagnostics.push({ type: 'duplicate-content-location', url: part.location })
+			}
+			seenLocations.add(part.location)
+		}
+		if (part.contentId !== undefined) {
+			if (seenContentIds.has(part.contentId)) {
+				diagnostics.push({ type: 'duplicate-content-id', contentId: part.contentId })
+			}
+			seenContentIds.add(part.contentId)
+		}
+	}
+}
+
+/**
+ * Parses an MHTML/MHT byte stream into an {@link MhtmlDocument}. Prefers
  * diagnostics over throwing: a malformed part is dropped with a
  * `malformed-resource`/`unsupported-encoding` diagnostic rather than
- * failing the whole archive, but a missing/unparseable top-level
- * `multipart/related` envelope has no reasonable partial result and is
- * reported as `malformed-archive` with `archive: undefined`.
+ * failing the whole document, but a missing/unparseable top-level
+ * `multipart/related` envelope, or one with no resolvable root part, has no
+ * reasonable partial result and is reported as `malformed-archive` with
+ * `document: undefined` — see `MhtmlDocument`'s invariants in
+ * `model/mhtml.ts`. A declared boundary that never opens a part is one such
+ * case; a missing *closing* delimiter is not, and recovers with a
+ * `recovered-non-conforming-input` diagnostic.
  */
-export function parseMhtml(bytes: Uint8Array): ParseResult {
+export function parseMhtml(bytes: Uint8Array): MhtmlParseResult {
 	const diagnostics: Diagnostic[] = []
 	const lines = splitLines(bytes)
 	const { headers, bodyStart } = parseHeaders(lines, 0)
@@ -412,68 +509,52 @@ export function parseMhtml(bytes: Uint8Array): ParseResult {
 	const contentTypeHeader = headers.get('content-type')
 	if (contentTypeHeader === undefined) {
 		diagnostics.push({ type: 'malformed-archive', message: 'missing top-level Content-Type header' })
-		return { archive: undefined, diagnostics }
+		return { document: undefined, diagnostics }
 	}
 
 	const contentType = parseContentType(contentTypeHeader)
 	if (contentType.type !== 'multipart/related') {
 		diagnostics.push({ type: 'unsupported-feature', feature: `top-level Content-Type "${contentType.type}"` })
-		return { archive: undefined, diagnostics }
+		return { document: undefined, diagnostics }
 	}
 
 	const boundary = contentType.params.get('boundary')
 	if (boundary === undefined) {
 		diagnostics.push({ type: 'malformed-archive', message: 'multipart/related is missing a boundary parameter' })
-		return { archive: undefined, diagnostics }
+		return { document: undefined, diagnostics }
 	}
 
 	const startParam = contentType.params.get('start')
 	const startCid = startParam === undefined ? undefined : normalizeCid(startParam)
 	const declaredMainUrl = headers.get('snapshot-content-location')
 
-	const parts: ParsedPart[] = []
-	for (const partLines of splitParts(lines, bodyStart, boundary)) {
-		const part = parsePart(partLines, diagnostics)
+	const multipart = splitParts(lines, bodyStart, boundary)
+	if (!multipart.opened) {
+		diagnostics.push({ type: 'malformed-archive', message: `multipart/related boundary "${boundary}" never appears as an opening delimiter` })
+		return { document: undefined, diagnostics }
+	}
+	if (!multipart.closed) {
+		diagnostics.push({ type: 'recovered-non-conforming-input', message: `multipart/related body has no closing "--${boundary}--" delimiter` })
+	}
+
+	const parts: MhtmlPart[] = []
+	for (const partLines of multipart.parts) {
+		const part = parsePart(bytes, partLines, diagnostics)
 		if (part !== undefined) {
 			parts.push(part)
 		}
 	}
 
-	const mainIndex = findMainPartIndex(parts, startCid, declaredMainUrl, diagnostics)
-	const mainResource = mainIndex === undefined ? undefined : parts[mainIndex]?.resource
-	// Even when no part matched, a declared main URL is still the archive's asserted main URL
-	// (the final check below reports `malformed-archive` since `mainResource` is undefined).
-	const mainUrl = mainResource?.url ?? declaredMainUrl
+	checkDuplicateIdentities(parts, diagnostics)
 
-	// The main resource is kept out of `resources`: see docs/architecture.md on why it must
-	// not appear in both places.
-	const resources = new Map<string, Resource>()
-	for (let i = 0; i < parts.length; i++) {
-		if (i === mainIndex) {
-			continue
-		}
-		const resource = parts[i]?.resource
-		if (resource === undefined) {
-			continue
-		}
-		if (resource.url === mainUrl || resources.has(resource.url)) {
-			diagnostics.push({ type: 'duplicate-resource-url', url: resource.url })
-			continue
-		}
-		resources.set(resource.url, resource)
-	}
+	const rootPartIndex = findMainPartIndex(parts, startCid, declaredMainUrl, diagnostics)
 
-	if (mainUrl === undefined || mainResource === undefined) {
+	if (rootPartIndex === undefined) {
 		diagnostics.push({ type: 'malformed-archive', message: 'no main resource found in multipart/related body' })
-		return { archive: undefined, diagnostics }
+		return { document: undefined, diagnostics }
 	}
 
-	const archive: Archive = {
-		mainUrl,
-		mainResource,
-		resources,
-		frames: [],
-	}
+	const document: MhtmlDocument = { parts, rootPartIndex }
 
-	return { archive, diagnostics }
+	return { document, diagnostics }
 }

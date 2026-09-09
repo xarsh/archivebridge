@@ -1,0 +1,35 @@
+From: <Saved by Blink>
+Snapshot-Content-Location: http://127.0.0.1:8091/iframe-cross-origin/
+Subject: iframe-cross-origin-root
+Date: Tue, 8 Sep 2026 21:50:35 +0900
+MIME-Version: 1.0
+Content-Type: multipart/related;
+	type="text/html";
+	boundary="----MultipartBoundary--uRVC15tQyieU9LKkyHPKg2i38zpTZy8AI8M25X4Bno----"
+
+
+------MultipartBoundary--uRVC15tQyieU9LKkyHPKg2i38zpTZy8AI8M25X4Bno----
+Content-Type: text/html
+Content-ID: <frame-058DE792864989E0289F781843EABCA5@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: http://127.0.0.1:8091/iframe-cross-origin/
+
+<!DOCTYPE html><html><head><meta http-equiv=3D"Content-Type" content=3D"tex=
+t/html; charset=3DUTF-8"><title>iframe-cross-origin-root</title></head>
+<body>
+<h1>root (origin A)</h1>
+<iframe src=3D"cid:frame-C293DA3FD246F446F345532B12E63371@mhtml.blink" widt=
+h=3D"300" height=3D"150"></iframe>
+
+</body></html>
+------MultipartBoundary--uRVC15tQyieU9LKkyHPKg2i38zpTZy8AI8M25X4Bno----
+Content-Type: text/html
+Content-ID: <frame-C293DA3FD246F446F345532B12E63371@mhtml.blink>
+Content-Transfer-Encoding: quoted-printable
+Content-Location: http://127.0.0.1:8092/iframe-cross-origin/child.html
+
+<!DOCTYPE html><html><head><meta http-equiv=3D"Content-Type" content=3D"tex=
+t/html; charset=3DUTF-8"><title>child-origin-B</title></head>
+<body><p>cross-origin child frame (origin B, port 8092)</p>
+</body></html>
+------MultipartBoundary--uRVC15tQyieU9LKkyHPKg2i38zpTZy8AI8M25X4Bno------

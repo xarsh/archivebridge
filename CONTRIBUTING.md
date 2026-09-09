@@ -16,6 +16,26 @@ CLI/extension design), see [docs/architecture.md](docs/architecture.md).
   it into `archivebridge-core`/`archivebridge-cli`/etc. unless a concrete
   technical reason emerges — ask before doing so.
 
+## Node.js versions
+
+Three places name a Node version, and they mean different things:
+
+- `engines.node` (`>=24`) is the **supported floor** — the oldest Node a
+  consumer of `@xarsh/archivebridge` may run. Every runtime dependency
+  supports it, and `@exodus/bytes` exists specifically to hold this floor
+  (see Dependency policy below).
+- `mise.toml` (`26`) is the **default local development toolchain**, not a
+  requirement. Newer than the floor is intentional: contributors work on
+  current Node.
+- CI's matrix (`24`, `26`) is what actually **proves the floor**. Node 24
+  is exercised on every push and pull request, so `>=24` is a tested
+  claim rather than an assumption. To reproduce the floor locally, use
+  `mise use node@24` (or any Node 24 install) — nothing in the repo
+  depends on Node 26 features.
+
+Change `engines.node` only together with the CI matrix, so the declared
+floor never stops being the tested floor.
+
 ## Dependency policy
 
 - Runtime dependencies start at **zero**. Adding one requires a concrete
@@ -29,7 +49,39 @@ CLI/extension design), see [docs/architecture.md](docs/architecture.md).
   a non-trivial format (an offset table, variable-width integers, object
   references); this project's untrusted-input security assumptions call
   for a battle-tested implementation rather than a hand-written one. See
-  `webarchive/parse.ts`/`webarchive/serialize.ts`.
+  `webarchive/parse.ts`/`webarchive/serialize.ts`. Delegating the *format*
+  is not the same as trusting the *shape* of the result: every dictionary
+  it returns is narrowed through `plist-dict.ts` before any field is read
+  (see [docs/architecture.md#security-assumptions](docs/architecture.md#security-assumptions),
+  "Only a dictionary's own keys are data"), and any new code that reads
+  plist output must go through that boundary too.
+- `parse5` is used to locate `<iframe>`/`<frame>` `src` attributes,
+  effective `<base href>`, and declarative Shadow DOM frame traversal
+  when flattening/reconstructing frames during WebArchive ⇄ MHTML
+  conversion (`mhtml/html-rewrite.ts`). It's used purely to find exact
+  source-string offsets (`sourceCodeLocationInfo`), never to re-serialize
+  the document — only the located attribute span is spliced, so nothing
+  else about the HTML changes. A hand-rolled scanner would need to
+  correctly reproduce the real HTML5 tokenizer's tag/attribute/RAWTEXT/
+  comment states to be safe against adversarial input (a fake `<iframe>`
+  inside a comment or a `<script>` string, a duplicate `src` attribute,
+  unquoted/single-quoted values); `parse5` already does, and is what
+  jsdom and Deno use for the same job. One transitive dependency
+  (`entities`). See docs/architecture.md, "Frame representation" for the
+  full evaluation.
+- `iconv-lite` is used for legacy (non-UTF-8) `textEncoding` decode/encode
+  when resource HTML has to be decoded, edited (frame `src` rewriting),
+  and re-encoded without changing its declared charset
+  (`mhtml/text-codec.ts`). The platform `TextEncoder` is UTF-8-only by
+  spec and Node has no built-in general-purpose charset encoder, so there
+  is no standard API that can encode into a legacy single-/double-byte
+  charset at all — only `TextDecoder` can decode one. Using `iconv-lite`
+  for both directions keeps a decode-edit-encode round trip internally
+  consistent (the same codec table on both ends), rather than pairing
+  `TextDecoder` with some unrelated encoder for the "same" label and
+  risking a mismatch between two implementations' notion of what that
+  label means. Pure JS, no native bindings to build, widely used. See
+  `mhtml/text-codec.ts`'s module doc comment for the full rationale.
 - `@exodus/bytes` (`base64.js` submodule only) is used for MHTML base64
   encode/decode instead of the platform `Uint8Array.fromBase64`/`toBase64`.
   That API requires V8 14 (Node 25+); this project's `engines` floor is
@@ -77,6 +129,15 @@ for why each is enabled. Within that:
   TypeScript type stripping. The published npm package must ship compiled
   JS + `.d.ts` (via `tsc`) — consumers of `@xarsh/archivebridge` must
   never be required to run TypeScript source directly.
+- These conventions govern **workspace source** (`packages/*`, `apps/*`).
+  Repo-level tooling under `scripts/` is deliberately plain ESM
+  JavaScript (`.mjs`) instead: it is dependency-free bootstrap tooling
+  that must run under a bare `node` with no tsconfig and no build step,
+  and `scripts/` is covered by no workspace tsconfig, so a `.ts` file
+  there would be type-*annotated* without ever being type-*checked* —
+  the appearance of safety without the substance. Keep `scripts/` in
+  JavaScript unless it grows enough to justify its own tsconfig wired
+  into `npm run typecheck`.
 
 ## Testing philosophy
 
@@ -98,12 +159,23 @@ Run from the repo root:
 - `npm test` — run all workspace tests (`node --test`)
 - `npm run lint` — Biome check (format, lint, and import-sorting diagnostics; no writes)
 - `npm run format` — Biome check --write (applies formatting, import sorting, and safe lint fixes)
-- `npm run check` — typecheck + test + lint (the pre-PR gate)
+- `npm run check:filenames` — verifies file/directory naming policy (see File and directory naming)
+- `npm run check` — typecheck + test + lint + check:filenames + build (the pre-PR gate)
 
 `packages/archivebridge` exposes the same script names (plus `check` and
 `clean`) so it can be run standalone. `apps/extension` exposes
 `build`/`typecheck`/`lint`/`format` the same way, but has no `test` or
 `check` script yet since the extension has no tests to run.
+
+## File and directory naming
+
+Project-owned files and directories use lowercase kebab-case (e.g.
+`to-mhtml.ts`, `html-rewrite.test.ts`). Conventional ecosystem/tool-mandated
+names (`README.md`, `package.json`, `tsconfig.json`, `manifest.json`,
+`.gitignore`, `.github/`, ...) are exempt. This is enforced by Biome's
+`useFilenamingConvention` rule for JS/TS files and by
+`npm run check:filenames` (`scripts/check-filenames.mjs`) for everything
+else.
 
 ## Adding regression fixtures
 
@@ -111,8 +183,11 @@ When fixing a bug reported against a real archive, reduce it to the
 smallest archive that reproduces it, add it under `fixtures/mhtml/` or
 `fixtures/webarchive/` with a descriptive name (not a counter), and add a
 permanent test against it. Keep fixtures small and, where possible,
-text-editable — no large binary fixtures without a specific need. See
-[fixtures/README.md](fixtures/README.md).
+text-editable — no large binary fixtures without a specific need, and
+document the need in `fixtures/README.md` when there is one (as
+`mdn-background-image.*` does). A golden fixture captured from a
+third-party page also needs its source and license recorded there before
+it lands. See [fixtures/README.md](fixtures/README.md).
 
 ## Boundaries to keep
 

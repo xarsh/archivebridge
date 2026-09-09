@@ -3,7 +3,7 @@
 	"version": "0.0.1",
 	"private": true,
 	"license": "MIT",
-	"description": "ArchiveBridge browser extension (Firefox first).",
+	"description": "ArchiveBridge browser extension. UI placeholder; Chrome, Edge, Firefox and Safari are planned first-class targets.",
 	"type": "module",
 	"scripts": {
 		"build": "tsc -p tsconfig.json",
