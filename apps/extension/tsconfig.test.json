@@ -1,0 +1,10 @@
+{
+	"$schema": "https://json.schemastore.org/tsconfig",
+	"extends": "../../tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"types": ["node"],
+		"lib": ["esnext", "dom", "dom.iterable"]
+	},
+	"include": ["src/**/*.test.ts", "src/chrome/chrome-api.d.ts", "e2e/**/*"]
+}

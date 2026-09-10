@@ -5,50 +5,49 @@
 		<title>ArchiveBridge</title>
 		<style>
 			body {
-				width: 320px;
-				font: 13px system-ui, sans-serif;
+				width: 224px;
 				margin: 0;
-				padding: 12px;
+				padding: 8px;
+				font: 13px system-ui, sans-serif;
+				color: canvastext;
+				background: canvas;
 			}
-			h1 {
-				font-size: 14px;
-				margin: 0 0 8px;
-			}
-			#drop-zone {
-				border: 2px dashed #888;
+			button {
+				display: block;
+				width: 100%;
+				padding: 8px 10px;
+				margin: 0 0 6px;
+				font: inherit;
+				text-align: left;
+				border: 1px solid color-mix(in srgb, canvastext 25%, transparent);
 				border-radius: 6px;
-				padding: 24px 12px;
-				text-align: center;
-				color: #555;
-			}
-			#drop-zone.drag-over {
-				border-color: #0060df;
-				color: #0060df;
-			}
-			label[for="file-input"] {
-				color: #0060df;
-				text-decoration: underline;
+				background: color-mix(in srgb, canvastext 5%, transparent);
+				color: inherit;
 				cursor: pointer;
 			}
-			#file-list {
-				margin: 8px 0 0;
-				padding: 0;
-				list-style: none;
-				font-family: monospace;
-				word-break: break-all;
+			button:hover:enabled {
+				background: color-mix(in srgb, canvastext 12%, transparent);
+			}
+			button:disabled {
+				cursor: default;
+				opacity: 0.5;
+			}
+			#status {
+				margin: 0;
+				min-height: 1.4em;
+				font-size: 12px;
+				color: color-mix(in srgb, canvastext 65%, transparent);
+				overflow-wrap: anywhere;
+			}
+			#status.error {
+				color: #b3261e;
 			}
 		</style>
 	</head>
 	<body>
-		<h1>ArchiveBridge</h1>
-		<div id="drop-zone">
-			Drop or
-			<label for="file-input">select</label>
-			a file:
-			<div>.mhtml &middot; .mht &middot; .webarchive</div>
-			<input id="file-input" type="file" accept=".mhtml,.mht,.webarchive" hidden />
-		</div>
-		<ul id="file-list"></ul>
-		<script type="module" src="./dist/popup.js"></script>
+		<button id="save-mhtml" type="button">Save as MHTML&hellip;</button>
+		<button id="save-webarchive" type="button">Save as WebArchive&hellip;</button>
+		<p id="status"></p>
+		<script type="module" src="popup.js"></script>
 	</body>
 </html>

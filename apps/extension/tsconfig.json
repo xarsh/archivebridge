@@ -1,9 +1,12 @@
 {
+	"$schema": "https://json.schemastore.org/tsconfig",
 	"compilerOptions": {
 		"target": "es2022",
 		"lib": ["es2022", "dom", "dom.iterable"],
 		"module": "esnext",
 		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
 		"strict": true,
 		"noUncheckedIndexedAccess": true,
 		"exactOptionalPropertyTypes": true,
@@ -12,8 +15,8 @@
 		"forceConsistentCasingInFileNames": true,
 		"isolatedModules": true,
 		"skipLibCheck": true,
-		"rootDir": "src",
-		"outDir": "dist"
+		"types": []
 	},
-	"include": ["src/**/*"]
+	"include": ["src/**/*"],
+	"exclude": ["src/**/*.test.ts"]
 }

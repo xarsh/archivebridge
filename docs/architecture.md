@@ -20,20 +20,21 @@ built. To read it accurately:
 WebArchive parsing and serialization, direct WebArchive ⇄ MHTML
 conversion, frame flattening/reconstruction, the metadata sidecar,
 diagnostics, and format detection — plus the `archivebridge inspect` and
-`archivebridge convert` CLI subcommands built on top of them.
+`archivebridge convert` CLI subcommands built on top of them. And, as of
+v0.1, the **Chrome/Edge extension's capture and save**: the current page
+saved as MHTML or WebArchive from a toolbar popup or the page context
+menu.
 
-**Planned.** Browser `capture` and `save` (the extension's whole reason
-to exist), a `validate` command, and the extension's four-browser
-production support. `apps/extension` today is a UI placeholder — a popup
-that accepts files and lists their names, with no archive logic in it at
-all.
+**Planned.** The extension's **archive viewer**, its **Firefox and Safari**
+capture/save adapters, and a `validate` command.
 
-Sections below discussing `validate`, `capture`, or `save` are specifying
-where that functionality will fit and what invariants it must respect, not
-describing code that exists. They are marked where the distinction could
-otherwise be missed. The commitment that Chrome, Edge, Firefox, and Safari
-are all first-class targets is an architectural constraint that holds now
-and binds the implementation whenever it lands.
+Sections below discussing `validate`, the viewer, or non-Chromium
+browsers are specifying where that functionality will fit and what
+invariants it must respect, not describing code that exists. They are
+marked where the distinction could otherwise be missed. The commitment
+that Chrome, Edge, Firefox, and Safari are all first-class targets is an
+architectural constraint that holds now and binds the implementation
+whenever it lands.
 
 ## Goals
 
@@ -41,12 +42,12 @@ See [README.md](../README.md#what-works-today) for what ArchiveBridge does
 and who it's for.
 
 The library (`packages/archivebridge`, published as `@xarsh/archivebridge`)
-is the core. The CLI is a thin consumer of it, and the extension is
-required to be one — nothing archive-format-specific may live outside the
-library, which is why the extension stays UI-only rather than
-reimplementing parsing while its bundler question is open. Everything
-below this point is the *why* behind the decisions that follow from those
-goals.
+is the core. The CLI is a thin consumer of it and so is the extension —
+nothing archive-format-specific may live outside the library. The
+extension's whole archive logic is one browser-neutral module that calls
+the library's public API (`core/archive-bytes.ts`); everything else in it
+is per-browser platform glue. Everything below this point is the *why*
+behind the decisions that follow from those goals.
 
 ## MHTML is the canonical format
 
@@ -55,14 +56,16 @@ the format every capture path converges on, and the format every other
 capability is built against directly:
 
 ```text
-Chrome / Edge   live page --native MHTML capture-->  MHTML   (planned)
+Chrome / Edge   live page --native MHTML capture-->  MHTML
 Firefox         live page --custom MHTML capture-->  MHTML   (planned)
 Safari          live page --custom MHTML capture-->  MHTML   (planned)
 
 MHTML --inspect
 MHTML --convert--> WebArchive
 WebArchive --convert--> MHTML
-MHTML --save / validate                                      (planned)
+MHTML --save                     (browser extension: Chrome/Edge)
+MHTML --validate                                             (planned)
+MHTML --view                                                 (planned)
 ```
 
 This choice rests on a corpus of real Chrome-generated MHTML captures
@@ -85,13 +88,24 @@ separate concerns on purpose:
   equivalent to each other) are a snapshot of the **post-load,
   post-script-execution DOM tree, serialized to static markup, with
   `<script>` elements stripped** — not a re-executable bundle, not a
-  full resource-cache dump. Concretely, this means Chrome-native capture
-  reflects DOM mutations already applied before capture, but never
-  captures: live form control state (`value`/`checked`/`selected` set via
-  JS), `<canvas>` pixel content, `@font-face`-referenced font files,
-  `<link rel=preload>` resources never inserted into the DOM, and
-  `blob:` URLs backed by an in-memory `Blob` (as opposed to a `File`).
-  Attached shadow roots *are* captured, via declarative Shadow DOM.
+  full resource-cache dump. Concretely, Chrome-native capture reflects
+  DOM mutations already applied before capture, and it *does* capture
+  `@font-face`-referenced font files, `blob:` URLs backed by an
+  in-memory `Blob`, same-origin and cross-origin subframes, and attached
+  shadow roots. It does **not** capture: live form control state
+  (`value`/`checked`/`selected` set via JS), `<canvas>` pixel content,
+  `adoptedStyleSheets`/constructed stylesheets, or `<link rel=preload>`
+  resources never inserted into the DOM (the markup reference survives;
+  the bytes do not).
+- **Blink serializes an attached shadow root as a `<template>` carrying
+  the legacy pre-standard attribute `shadowmode="open"`, not the
+  standardized `shadowrootmode`.** No current browser hydrates
+  `shadowmode`, so shadow content in a Chrome-captured archive is inert
+  markup until something rewrites the attribute. Any ArchiveBridge viewer
+  that wants native declarative Shadow DOM hydration must normalize
+  `shadowmode` to `shadowrootmode` itself, and any fidelity claim this
+  project makes about "declarative Shadow DOM" has to name the attribute
+  Blink actually writes rather than the one the standard defines.
 
 These capture-semantics gaps are **properties of what a browser's native
 capture API can ever produce**, not properties of the MHTML format
@@ -1046,25 +1060,57 @@ diagnostics.
 
 ## Browser extension: capture and save are separate per-browser concerns
 
-> **Status: planned.** Everything in this section describes a design not
-> yet built. `apps/extension` today is a UI placeholder — see "Current
-> state of `apps/extension`" at the end of this section.
+> **Status: Chrome/Edge implemented (v0.1); Firefox and Safari planned.**
+> The Chrome extension saves the current page as MHTML or WebArchive. It
+> is not yet a viewer — see "Archive viewer" below.
 
-The extension targets **Chrome, Edge, Firefox, and Safari** as an
-architecture matter — implementation is free to build one browser before
-another, but the design is not allowed to be single-browser. Two
-responsibilities are kept as distinct browser-adapter concerns, because
-they vary independently per browser:
+### What the browser already does, and what is left for ArchiveBridge
+
+Every design decision here follows from one fact: **no browser exposes any
+extension hook into its native Save As format selector.** There is no API
+in Chrome, Edge, Firefox or Safari that registers a file format with the
+save dialog or participates in the page-save pipeline. Chromium *has* a
+MIME-handler extension point (`mime_types` + `mimeHandlerPrivate`, which
+is how the built-in PDF viewer works), but it is restricted to
+component/allowlisted extensions and offers only `application/pdf` to
+public handlers; `file_handlers` is ChromeOS-only. Blink's MHTML
+serializer and WebKit's `createWebArchiveData()` are likewise internal.
+
+So the ideal UX — MHTML and WebArchive appearing as extra entries in the
+browser's own Save As dialog — is not achievable anywhere, and **taking
+over `Cmd-S` is out of scope**: an extension *can* bind it as a `commands`
+shortcut, but that replaces the browser's Save Page behavior rather than
+extending it, which is a worse product than leaving it alone.
+
+What the browsers already do natively, and where the gaps are:
+
+| | MHTML in native Save As | WebArchive in native Save As | Native MHTML capture API |
+| --- | --- | --- | --- |
+| Chrome / Edge | **yes** ("Webpage, Single File") | no | **yes** (`chrome.pageCapture.saveAsMHTML()`) |
+| Firefox | no | no | no |
+| Safari | no | **yes** ("Web Archive") | no |
+
+ArchiveBridge's job in the save direction is therefore exactly the
+complement: **WebArchive on Chrome/Edge, both formats on Firefox, and
+MHTML on Safari.** That is also why v0.1 offers both commands on Chrome
+even though MHTML is already reachable from `Cmd-S` there — the two
+commands are the same code path apart from one conversion step, and
+offering only one of them would be a stranger UI than offering both.
+
+### Capture and save vary independently
 
 ```text
-                    Capture                        Save
-Chrome / Edge       native MHTML (chrome.pageCapture  browser download path
-                    .saveAsMHTML(), confirmed
-                    behaviorally equivalent to CDP's
-                    Page.captureSnapshot)
-Firefox             custom MHTML capture (no native   browser download path
-                    MHTML capture API)
-Safari              custom MHTML capture               Safari-specific save path
+                    Capture                            Save
+Chrome / Edge       native MHTML                       downloads API +
+                    (chrome.pageCapture.saveAsMHTML(), offscreen document
+                    confirmed behaviorally equivalent
+                    to CDP's Page.captureSnapshot)
+Firefox             custom MHTML capture               downloads API
+                    (no native MHTML capture API)      (blob URL directly
+                                                       from the background)
+Safari              custom MHTML capture               native messaging to
+                                                       the containing app
+                                                       (no downloads API)
 ```
 
 - **Capture** produces canonical MHTML bytes from the live page. Chrome
@@ -1074,43 +1120,348 @@ Safari              custom MHTML capture               Safari-specific save path
   MHTML capture API. A from-scratch capture implementation is not
   obligated to reproduce Blink's capture-semantics gaps (see "Format vs.
   capture semantics" above) — it may capture more (or differently) than
-  Chrome does, as long as it stays valid MHTML.
+  Chrome does, as long as it stays valid MHTML. A Firefox content script
+  can in fact read live form state, `<canvas>` pixels and cross-origin
+  stylesheet text, all of which Blink's capture drops.
 - **Save** is how captured bytes reach the user's disk, which differs by
-  platform (standard browser download APIs for Chrome/Edge/Firefox;
-  Safari has its own save path).
+  platform: Chrome/Edge and Firefox both have `downloads`, but only
+  Firefox's background context can mint a blob URL; Safari has no
+  `downloads` API at all, so its save path has to go through the macOS
+  app that a Safari Web Extension must ship inside anyway.
 
 Keeping these separate means a browser that has native capture but needs
 a custom save path (or vice versa) doesn't force capture and save logic
 to be coupled together per browser.
 
-### Current state of `apps/extension`
+### The Chrome v0.1 pipeline
 
-The extension is a **UI placeholder**: a popup that accepts files via
-drag-and-drop or a file picker and lists the selected file names. It
-contains no archive parsing, no format detection, and no capture or save
-logic. `popup.ts` imports nothing but DOM APIs.
+```text
+popup button ─┐
+              ├─> runSaveCommand(format, tabId)      background service worker
+context menu ─┘        │
+                       ├─ captureMhtml(tabId)        chrome/capture.ts
+                       │     chrome.pageCapture.saveAsMHTML()
+                       ├─ archiveBytesFrom(bytes, f) core/archive-bytes.ts
+                       │     MHTML:      pass through byte for byte
+                       │     WebArchive: parseMhtml -> convertMhtmlToWebArchive
+                       │                 -> serializeWebArchive
+                       └─ saveBytes(...)             chrome/save.ts
+                             offscreen document -> blob: URL
+                             chrome.downloads.download({ saveAs: true })
+```
 
-That is deliberate rather than merely unfinished. `apps/extension` has no
-bundler, so it cannot import `@xarsh/archivebridge` without either adding
-one or duplicating library logic inside the extension — and duplicating it
-is ruled out by CONTRIBUTING.md's boundary rules. Staying UI-only is the
-option that keeps the boundary intact while the bundler question is open.
+Only the two ends are Chrome-specific. `core/` has no `chrome.*` and no
+DOM at all, which is what lets the whole byte-generation half be asserted
+directly on real captured bytes with no browser involved — and what makes
+adding Firefox a matter of swapping the two adapters rather than writing a
+second pipeline.
 
-**The bundler choice (WXT vs. plain `tsc` vs. something else) is
-deliberately not decided here.** The trigger for deciding it is wiring the
-extension up to actually call `@xarsh/archivebridge`, which is what
-capture/save adapters will require. Until then there is nothing to bundle:
-the extension has zero non-DOM imports.
+**Permissions are `pageCapture`, `downloads`, `offscreen`, `contextMenus`,
+and deliberately nothing else.** In particular:
 
-**Why the manifest currently looks Firefox-specific.** `manifest.json`
-carries a `browser_specific_settings.gecko` block (an extension ID and a
-`strict_min_version`), because Firefox requires an explicit ID to load an
-unsigned extension during development and the scaffold is loaded there
-first. The key is additive and ignored by Chromium browsers, so it does
-not make the extension Firefox-only and does not narrow the four-browser
-commitment above — it reflects which browser the placeholder is currently
-loaded in, nothing more. Chrome, Edge, Firefox, and Safari all remain
-first-class targets.
+- **No `host_permissions`.** Native capture of an ordinary `http(s)` tab
+  needs none, which is verified in the E2E suite at both build time (the
+  built manifest) and runtime (`chrome.permissions.getAll().origins` is
+  empty).
+- **No `tabs`/`activeTab`.** `chrome.tabs.query` returns a tab's `id`
+  without any permission; `url` and `title` are the gated fields. The
+  download file name is derived from the *archive's own* main-resource
+  URL instead of from tab metadata — see `core/file-name.ts`. That keeps
+  the permission set minimal and keeps naming browser-neutral.
+- **No `notifications`.** Failures surface through the popup's status
+  line and, for the context-menu path (which has no popup), the toolbar
+  badge and its tooltip. Neither needs a permission.
+
+The UI is two commands — **Save as MHTML…** and **Save as WebArchive…** —
+in the toolbar popup and in the page context menu, both routed through the
+same `runSaveCommand`. There is no settings screen and no
+archive-conversion UI in the browser: conversion is the CLI's job, and the
+browser surface stays small on purpose.
+
+### Why the MV3 save path needs an offscreen document
+
+The Chrome save path looks convoluted and is forced by two measured
+platform facts that point in opposite directions:
+
+- `URL.createObjectURL` is **undefined in an MV3 service worker**, which
+  is where `chrome.pageCapture.saveAsMHTML()` has to run.
+- `chrome.downloads` is **undefined inside an offscreen document**, which
+  is the only extension context that has `createObjectURL`.
+
+Neither context can do the whole job, so the bytes cross from the worker
+to an offscreen document and come back as a `blob:` URL string, which the
+worker hands to `chrome.downloads.download`.
+
+**How the bytes cross matters, because the obvious mechanism does not
+work.** `chrome.runtime.sendMessage` serializes as JSON: a `Blob` and an
+`ArrayBuffer` both arrive as `{}`, and a `Uint8Array` arrives as an object
+with one numeric key per byte. Three mechanisms that do work were compared
+on a real 12.9 MB `pageCapture` result:
+
+| mechanism | service worker -> offscreen | leaves state behind |
+| --- | --- | --- |
+| `BroadcastChannel` | 1 ms | no |
+| Cache Storage | 9 ms | yes, until deleted |
+| IndexedDB | 12 ms | yes, until deleted |
+
+`BroadcastChannel` is chosen: it is a structured-clone message channel
+between same-origin extension contexts, so the `Blob` crosses by
+reference, and — unlike the two storage APIs — there is nothing that can
+outlive a failed save. A crash between "write bytes" and "delete bytes"
+would leak archive content into the profile on disk; there is no such
+window here. Cache Storage and IndexedDB remain the fallbacks if a future
+requirement genuinely needs a handoff that survives service-worker
+termination.
+
+**A save can outlive the service worker, and the design has to assume it
+will.** Chrome's documented lifecycle terminates an extension service
+worker after 30 seconds of inactivity, and after 5 minutes on any single
+request; the APIs that are documented to survive longer are the four
+user-prompt ones (`desktopCapture.chooseDesktopMedia`,
+`identity.launchWebAuthFlow`, `management.uninstall`,
+`permissions.request`), and `downloads.download` is not among them.
+Measured against the real native chooser in a headed Chrome for Testing
+153:
+
+- the initiating worker *is* kept alive while the chooser is open, well
+  past the 30-second idle timeout — but it is terminated at ~6 minutes
+  with the chooser still up;
+- the offscreen document, its `blob:` URL and the `in_progress`
+  `DownloadItem` all survive that termination, and the download still
+  completes when the user finally picks a file;
+- the popup's pending `sendMessage` does not: it rejects with "the message
+  channel closed before a response was received", so a save that succeeds
+  is reported to the user as a failure.
+
+So the save path is built around the one piece of state the browser keeps
+across worker restarts: the `DownloadItem`. Its `url` is the `blob:` URL
+the offscreen document minted, which begins with this extension's own
+origin, so a restarted worker can recognise its predecessor's save with no
+bookkeeping of its own — no IndexedDB, no Cache Storage, no new permission.
+Two consequences:
+
+- **The completion handler is registered at global scope**
+  (`downloads.onChanged` in `background.ts`), which is what lets Chrome
+  start a worker to deliver it. A listener added inside the save path
+  cannot: measured, once the worker that registered one dynamically was
+  gone, download activity started no new worker, so nothing released the
+  bytes and nothing reported the outcome.
+- **Cleanup is conditional rather than blind.** A worker start no longer
+  assumes a surviving offscreen document is stale; it frees the bytes only
+  when no download of this extension's is still `in_progress` and no save
+  is running in this worker. Command serialization cannot make that safe,
+  because it lives in the memory of the worker that died.
+
+One measured platform fact is worth recording because the code's shape
+suggests otherwise: **Chrome reads a `blob:` URL eagerly, before the
+chooser is answered.** A 200 MB blob download reported
+`bytesReceived === totalBytes` within 250 ms of `download()` returning,
+with the chooser still open, and closing the offscreen document at that
+point still produced a byte-complete file. Releasing the bytes mid-chooser
+is therefore not observably fatal today; the conditional release is kept
+because it costs one `downloads.search` call, does not depend on
+undocumented staging timing, and covers the window between minting a URL
+and Chrome reading it, where no `DownloadItem` exists to speak for the
+bytes.
+
+Post-terminal cleanup is best-effort, on the same footing as
+`showOutcome`: it releases memory after a save has already succeeded or
+failed, so a failure to close the offscreen document must not become — or
+mask — the save's outcome.
+
+There is also a registration race worth knowing about, since it is the
+kind of thing that reads as correct: taking the download id first and
+*then* starting to listen leaves a gap in which the download can reach a
+terminal state and no further `onChanged` will ever arrive, hanging the
+save until Chrome kills the worker. Measured at 3 of 180 multi-megabyte
+blob downloads. The save path closes it by reading the item's current
+state after it starts listening, which is enough — no polling.
+
+**Measured ceiling.** The handoff itself is not the limit: a
+`BroadcastChannel` mint succeeded at 805 MB in under a millisecond. The
+limit is `chrome.downloads` reading a blob URL — a download of real
+captured bytes completed at 470 MB and failed with `NETWORK_FAILED` at
+503 MB. Anything a page capture realistically produces is far below that.
+
+**No top-level `await` anywhere in the service worker's module graph.** A
+service worker script that uses one fails to register at all, and the
+failure mode is an extension that silently never starts.
+
+### Building the extension: esbuild, not a framework
+
+`apps/extension` now imports `@xarsh/archivebridge`, so `tsc` alone is no
+longer enough — the library and its dependency graph have to be bundled
+into each of the three extension contexts (service worker, offscreen
+document, popup), none of which can resolve a bare npm specifier.
+
+**esbuild does exactly that and nothing more**, driven by a single
+`build.mjs` that bundles the three entry points and copies
+`manifest.json`, `popup.html` and `offscreen.html`. A WebExtension
+framework (WXT and similar) was considered and rejected: it would
+additionally own the manifest, a dev server, per-browser output variants
+and an HTML pipeline, none of which this extension has a use for — one
+hand-written manifest, three entry points, two static HTML files. That is
+a lot of machinery to adopt in exchange for a file copy, and it would put
+a framework's conventions between this project and the extension platform
+whose exact behavior (see the MV3 notes above) it depends on knowing.
+Using esbuild's JS API rather than its CLI has the incidental benefit of
+not needing the `esbuild` package's postinstall step, so `npm ci` requires
+no install-script allowance.
+
+**The library bundles for the browser, with one caveat.** Nothing in
+`packages/archivebridge`'s public API imports `node:` anything, and
+`plist` ships a `browser` export condition that drops `@xmldom/xmldom` and
+`xmlbuilder` in favor of the platform's own `DOMParser`. The one gap is
+`iconv-lite`, which is written against Node's `Buffer` and
+`string_decoder`; the extension therefore depends on the `buffer` and
+`string_decoder` polyfill packages, which esbuild resolves like any other
+dependency. Stubbing `iconv-lite` out instead was rejected: it would
+silently change what the library does with a non-UTF-8 resource, which is
+exactly the class of silent-charset bug `mhtml/text-codec.ts` exists to
+prevent. The charset tables dominate the bundle (~400 kB of ~700 kB), and
+that is an acceptable price for the library behaving identically in both
+runtimes.
+
+This also sharpens CONTRIBUTING.md's boundary rule. "Nothing in the public
+API assumes Node" holds in the sense that matters — no `node:` imports, no
+`process`, no filesystem — but "runs in a browser" currently means "runs
+in a browser with a `Buffer` polyfill". Revisit when `iconv-lite` is
+revisited.
+
+### Per-browser manifests
+
+`manifest.json` is a **Chrome MV3 manifest**, and only that: `pageCapture`
+and `offscreen` do not exist in Firefox, so this manifest could not load
+there even with a `browser_specific_settings.gecko` block (the placeholder
+scaffold carried one, because Firefox needs an explicit ID to load an
+unsigned extension in development; it has been removed as misleading).
+Firefox and Safari will each get their own manifest when their capture and
+save adapters land — a per-browser manifest is a normal shape for a
+cross-browser extension and does not narrow the four-browser commitment.
+
+## Archive viewer
+
+> **Status: planned, not implemented.** This section fixes the
+> architecture and the security constraints so the eventual
+> implementation has something to satisfy. No viewer code exists.
+
+The extension's second responsibility is to *view* local `.mht`,
+`.mhtml` and `.webarchive` files that the browser cannot display itself.
+The native situation is again complementary: Chrome/Edge render MHTML
+from `file://` natively but download `.webarchive`; Safari renders
+`.webarchive` natively but does nothing at all with `.mhtml` (a blank
+tab — consistent with LaunchServices, where Safari claims
+`com.apple.webarchive` but not `org.ietf.mhtml`); Firefox shows MHTML as
+plain text and downloads `.webarchive`.
+
+### The viewer must reconstruct, not delegate
+
+The tempting shape is to hand the archive to the browser and let it
+render:
+
+```html
+<iframe src="archive.mhtml">      <!-- does not work -->
+<iframe src="archive.webarchive"> <!-- does not work -->
+```
+
+Neither makes an unsupporting browser parse the format. Chrome renders
+MHTML *only* from `file://`: served over HTTP as `multipart/related` or
+`application/x-mimearchive`, or navigated to as a
+`blob:chrome-extension://` URL with any of the three archive MIME types,
+it is downloaded rather than rendered — while the same blob labelled
+`text/html` renders fine, which proves the blob itself was navigable and
+the MIME type was the deciding factor. There is no way for the viewer to
+delegate to Chrome's own MHTML renderer.
+
+So the viewer has to reconstruct the document from ArchiveBridge's own
+parse:
+
+```text
+archive bytes
+  -> ArchiveBridge parser (parseMhtml / parseWebArchive)
+  -> WebArchive converts to canonical MHTML if needed
+  -> resolve archive resources and frames from the flat part list
+  -> rewrite references to viewer-controlled resource URLs
+  -> render the reconstructed HTML in a sandboxed iframe
+```
+
+This is the same *shape* as PDF.js at the loader/viewer boundary — the
+extension owns parsing and resource resolution — but only there.
+**ArchiveBridge does not build a rendering engine**: layout, CSS and
+text remain the browser's own HTML/CSS engine's job. The viewer's output
+is HTML the browser lays out, not pixels ArchiveBridge draws.
+
+Note what this does *not* change: the pipeline above is
+`WebArchive -> canonical MHTML -> one common viewer`, which is the same
+canonical-format rule the rest of the project follows. It is not a
+cross-format `Archive`/`ArchiveView` IR, and adding one is not on the
+table (see "No format-neutral `Archive`/`ArchiveView` IR" above).
+
+### Security constraints the viewer must satisfy
+
+The browser will provide no format-specific protection for a
+reconstructed document, so whatever isolation the viewer has, it has to
+impose itself. Two measured facts set the stakes:
+
+- Chrome's *native* MHTML rendering is strikingly inert: a deliberately
+  hostile archive rendered from `file://` ran no scripts and made **zero**
+  external requests, while a plain-HTML twin of the same content in the
+  same directory ran its scripts and fired all five of its beacons. A
+  naive extension viewer would be *less* safe than what Chrome already
+  does for `.mhtml`, which is a good reason not to pre-empt Chrome's
+  renderer for that format.
+- Safari's *native* WebArchive rendering is the opposite: the same
+  hostile archive executed its scripts and reached the network. So
+  real-world `.webarchive` files must be expected to contain live script
+  and external references, because the format's own native renderer runs
+  them.
+
+The constraints, then:
+
+- **Foreign archive markup never executes in the extension's origin.**
+  Reconstructed content is rendered in a sandboxed iframe, never
+  inserted into an extension page's own DOM.
+- **No archived scripts execute at all.**
+- **No external network fallback.** A reference that cannot be satisfied
+  from inside the archive fails; it never falls through to the network.
+- **Archive-internal resources only** — every resolved reference maps to
+  a part of the archive being viewed.
+- **A strong iframe sandbox** and a **restrictive CSP** (`default-src
+  'none'`-shaped, widened only for viewer-controlled resource URLs).
+- **Recursive frame handling**, at the same bounded nesting depth the
+  parser already enforces (`MAX_FRAME_DEPTH`).
+- **Legacy Blink `shadowmode` normalization** — rewriting
+  `shadowmode` to `shadowrootmode` is required for shadow content to
+  hydrate at all (see "Format vs. capture semantics"), and it is a
+  *deliberate* widening of what renders, so it belongs to the viewer's
+  policy rather than to the parser.
+- **Links stay non-navigable** unless and until an explicit policy says
+  otherwise. Making archived links live is a product decision with
+  privacy consequences (it can leak that an archive was opened), not a
+  default.
+
+The test server in `apps/extension/e2e/test-page.ts` already records
+every request it receives, specifically so "the viewer made no network
+requests" can become an assertion rather than an aspiration.
+
+### Per-browser viewer reach, for later
+
+- **Chrome/Edge:** fully reachable with the extension alone. Raw bytes of
+  a local archive are readable via `fetch()` on the `file://` URL once
+  the user enables the per-extension "Allow access to file URLs" toggle
+  (which defaults to off), and `declarativeNetRequest` can redirect a
+  `file://` main-frame navigation to a viewer page, carrying the original
+  URL along. `chrome.pageCapture` cannot re-capture an already-rendered
+  `file://` MHTML tab, so the viewer must work from bytes, not from the
+  rendered DOM.
+- **Firefox:** viewing is possible, automatic interception is not.
+  Neither `webRequest` nor `declarativeNetRequest` sees `file://`
+  navigations, so a double-click cannot be turned into an ArchiveBridge
+  viewer; the realistic flow is an extra click from the plain-text page a
+  content script *can* run on.
+- **Safari:** not reachable from the extension at all — `file://` is
+  unsupported for Safari Web Extensions, so reading local archives needs
+  the containing app and native messaging.
 
 ## TypeScript configuration
 
@@ -1122,10 +1473,17 @@ first-class targets.
   extensions in source files so Node.js can execute them directly using built-in
   type stripping during development. rewriteRelativeImportExtensions rewrites
   those extensions to `.js` in emitted package output.
-- `apps/extension` uses its own `tsconfig.json` (not extending the root
-  one) with `module: esnext`/`moduleResolution: bundler` and DOM libs,
-  since it targets a browser, not Node — a different module resolution
-  story than the library/CLI.
+- `apps/extension` splits its type checking in two, because its files
+  run in two different runtimes. `tsconfig.json` covers the extension
+  source that ships: `module: esnext`/`moduleResolution: bundler` and DOM
+  libs (it targets a browser and is resolved by a bundler, not by Node),
+  with `types: []` so nothing can quietly reach for a Node API.
+  `tsconfig.test.json` covers the files Node runs — unit tests and the
+  `e2e/` suite — and extends the root config for that reason; it adds the
+  DOM lib as well, since a Playwright `evaluate` callback is authored in a
+  Node file but executes in the browser. The split is what makes the
+  browser-neutrality of `core/` a checked property rather than a claim:
+  `core/` is the only source directory that type-checks under both.
 - `erasableSyntaxOnly` means the source never uses `enum`, parameter
   properties, `import =`/`export =`, or namespaces with runtime code —
   anything that isn't just "strip the types and it's valid JavaScript".
@@ -1139,9 +1497,9 @@ first-class targets.
 
 ## Testing
 
-Only `node:test` + `node:assert/strict` — no Vitest/Jest/Mocha. Layers 1–5
-below exist today; layers 6 and 7 are planned and marked as such. In
-increasing order of scope:
+Only `node:test` + `node:assert/strict` — no Vitest/Jest/Mocha. Layers 1–6
+below exist today; layer 7 is planned and marked as such. In increasing
+order of scope:
 
 1. **Unit tests** — parsing, serialization, URL resolution, MIME/charset
    handling, base64/quoted-printable, plist handling, `cid:` frame-root
@@ -1163,9 +1521,11 @@ increasing order of scope:
 5. **Malformed-input tests** — broken boundaries, invalid base64,
    duplicate identities, bad charsets, malformed/foreign metadata
    sidecar parts, `cid:` references with no matching part.
-6. **Browser extension integration tests** *(planned)* — Chrome, Edge,
-   Firefox, and Safari, once the extension does more than accept a file.
-   `apps/extension` has no test script today for exactly that reason.
+6. **Browser extension E2E** — a real Chromium with the real built
+   extension loaded, capturing a deterministic local page and saving it in
+   both formats, with the resulting bytes verified by
+   `@xarsh/archivebridge` itself. Chrome/Chromium only today; see "Browser
+   automation" below.
 7. **Real-world compatibility corpus** *(planned)* — periodic snapshots of
    real sites, run as an opt-in smoke test, never a required CI gate (no
    external network access in normal CI).
@@ -1173,3 +1533,76 @@ increasing order of scope:
 `fixtures/` is shared across the library, CLI, and extension so the same
 sample archives back tests everywhere. See [fixtures/README.md](../fixtures/README.md)
 for the fixture policy.
+
+### Browser automation
+
+Layer 6 uses **Playwright** (the `playwright` package, not
+`@playwright/test`) driven from `node:test`. Playwright documents and
+maintains first-class Chromium extension support — `launchPersistentContext`
+with `--load-extension`, the `serviceworker` event, `evaluate` inside an MV3
+service worker, and opening extension pages — which is precisely the set of
+operations a home-grown CDP harness would have to own: browser launch,
+target discovery, worker attach/detach, execution-context lifetime and all
+the races between them. That is several hundred lines of the code most
+likely to be flaky, traded for a dependency graph of two packages
+(`playwright` -> `playwright-core`). The test *runner* stays `node:test`,
+which is why the dependency is `playwright` and not `@playwright/test`.
+
+Two properties of the suite are deliberate:
+
+- **It asserts on bytes, not on dialogs.** The tests drive the production
+  save path unmodified and then read the file it wrote, parsing it with
+  `@xarsh/archivebridge`. That works because Playwright *replaces* Chrome's
+  download pipeline (`Browser.setDownloadBehavior` with `allowAndName`), so
+  `saveAs: true` completes with no chooser and no filename-determination
+  step at all — not, as it first appears, because headless Chromium
+  auto-accepts the chooser. Hand Chrome's own pipeline back and a
+  `saveAs` download in headless ends as `interrupted`/`USER_CANCELED`
+  (measured). Either way, no branch exists in `src/` for the benefit of
+  tests. Whether the chooser really appears is verified separately and
+  occasionally, by hand or by an agent, in a headed browser: the download
+  item stays `in_progress` with an empty filename and all bytes staged,
+  which is Chrome waiting on the user. **The OS file chooser is never a CI
+  gate.**
+- **Worker lifetime is tested, not assumed.** `e2e/save-lifecycle.test.ts`
+  terminates the MV3 service worker mid-save through the browser's `Target`
+  CDP domain (reached via `browser.newBrowserCDPSession()` — Playwright's
+  own connection, no second launch) and asserts what the restarted worker
+  does with the save it inherited. Holding a download pending needs Chrome's
+  download pipeline, so that suite asks for it and gives up the ability to
+  assert on written bytes in exchange; a
+  `chrome.downloads.onDeterminingFilename` deferral registered from a
+  test-owned extension page reproduces the chooser's observable state
+  (`in_progress`, empty filename, bytes staged) and releases it on cue.
+  Chrome cancels a download whose filename stays undetermined for ~15
+  seconds, so the hold is a budget, not a pause.
+- **It is not part of `npm run check`.** It needs a browser binary
+  (`npx playwright install chromium`) that the unit-test gate must not
+  require, so it is its own script (`npm run test:e2e`) and its own CI
+  job. See CONTRIBUTING.md, "Extension E2E tests".
+
+### Browser automation: where this is going
+
+Chrome v0.1's suite is the first lane of an eventual **browser conformance
+suite**: a live deterministic page -> browser capture -> MHTML ->
+WebArchive conversion -> parse/inspect assertions -> open/view assertions
+in a *different* browser. Assertions stay semantic (part lists, frame
+nesting, resource bytes); screenshots may supplement them but never
+replace them, because a pixel diff cannot tell a rendering change from a
+fidelity regression.
+
+- **Chrome/Chromium** — done: fully automated extension loading and MV3
+  service-worker testing, headless.
+- **Firefox** *(planned)* — temporary extension installation via
+  `web-ext`, then browser automation against the running Firefox. The
+  interesting tests there are of the custom capture implementation, since
+  Firefox has no native MHTML capture: form state, `<canvas>`,
+  cross-origin frames and stylesheets are all reachable from a content
+  script and all need their own assertions.
+- **Safari** *(planned, macOS-only)* — needs full Xcode, a containing app
+  and a signed Safari Web Extension, so it gets its own macOS lane.
+  Safari automation is explicitly **not** a blocker for Chrome work.
+
+The test server already records every request it serves, which is what
+turns the viewer's "no external network fallback" rule (see "Archive
+viewer") into an assertion rather than an aspiration.

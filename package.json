@@ -9,7 +9,8 @@
 		"lint": "biome check .",
 		"format": "biome check --write .",
 		"check:filenames": "node scripts/check-filenames.mjs",
-		"check": "npm run typecheck && npm run test && npm run lint && npm run check:filenames && npm run build"
+		"check": "npm run build && npm run typecheck && npm run test && npm run lint && npm run check:filenames",
+		"test:e2e": "npm run test:e2e --workspaces --if-present"
 	},
 	"repository": {
 		"type": "git",

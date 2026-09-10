@@ -1,13 +1,13 @@
 {
 	"manifest_version": 3,
 	"name": "ArchiveBridge",
-	"version": "0.0.1",
-	"description": "Inspect saved web page archives (MHTML, WebArchive) in your browser.",
-	"browser_specific_settings": {
-		"gecko": {
-			"id": "archivebridge@xar.sh",
-			"strict_min_version": "109.0"
-		}
+	"version": "0.1.0",
+	"description": "Save the current page as MHTML or Safari WebArchive.",
+	"minimum_chrome_version": "116",
+	"permissions": ["pageCapture", "downloads", "offscreen", "contextMenus"],
+	"background": {
+		"service_worker": "background.js",
+		"type": "module"
 	},
 	"action": {
 		"default_popup": "popup.html",

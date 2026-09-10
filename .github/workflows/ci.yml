@@ -19,7 +19,25 @@ jobs:
           cache: npm
       - run: npm ci
       # The same canonical pre-PR gate contributors run locally
-      # (typecheck + test + lint + check:filenames + build), rather than a
+      # (build + typecheck + test + lint + check:filenames), rather than a
       # second hand-maintained list of the individual steps that can drift
       # out of sync with it. See CONTRIBUTING.md, "npm scripts".
       - run: npm run check
+
+  # The extension E2E suite is its own job rather than part of `npm run check`:
+  # it needs a real Chromium, which the unit-test gate must not require. One
+  # Node version is enough — what it exercises is the browser, not Node.
+  # See CONTRIBUTING.md, "Extension E2E tests".
+  extension-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # The E2E suite loads `apps/extension/dist`, so it has to exist.
+      - run: npm run build
+      - run: npm run test:e2e

@@ -94,10 +94,41 @@ floor never stops being the tested floor.
   first ships the native API in an LTS line) is the practical minimum for
   this project** — at that point, drop `@exodus/bytes` and switch back to
   `Uint8Array.fromBase64`/`toBase64`.
-- devDependencies are `typescript`, `@types/node`, `@biomejs/biome`.
-  Don't add ESLint, Prettier, Vitest/Jest/Mocha, tsx/ts-node, or a CLI
-  argument-parser library without discussing it first — these were
-  explicitly excluded from the initial design.
+- `esbuild` (devDependency of `apps/extension`) bundles the extension.
+  It became necessary the moment the extension started importing
+  `@xarsh/archivebridge`: a service worker, an offscreen document and a
+  popup cannot resolve bare npm specifiers, and `tsc` does not bundle.
+  esbuild does that one job; a WebExtension framework (WXT and similar)
+  was evaluated and rejected because it would also take over the
+  manifest, a dev server, per-browser output and an HTML pipeline for an
+  extension that has one manifest, three entry points and two HTML
+  files. See docs/architecture.md, "Building the extension".
+- `buffer` and `string_decoder` (dependencies of `apps/extension`) are
+  bundle-time polyfills, needed only because `iconv-lite` is written
+  against Node's `Buffer`. They are not a new capability and must not
+  become one: no extension source may import them. Aliasing
+  `iconv-lite` to a stub instead was rejected — it would silently change
+  what the library does with a non-UTF-8 resource. Both go away if
+  `iconv-lite` does.
+- `playwright` (devDependency of `apps/extension`) drives the extension
+  E2E suite. Note the package: `playwright`, **not**
+  `@playwright/test` — the runner stays `node:test` (see Testing
+  philosophy). Its cost is two packages
+  (`playwright` -> `playwright-core`) against the several hundred lines
+  of browser-launch, target-discovery and worker-attach code a
+  home-grown CDP harness would need us to maintain. See
+  docs/architecture.md, "Browser automation".
+- devDependencies are otherwise `typescript`, `@types/node`,
+  `@biomejs/biome`. Don't add ESLint, Prettier, Vitest/Jest/Mocha,
+  tsx/ts-node, or a CLI argument-parser library without discussing it
+  first — these were explicitly excluded from the initial design.
+- `@types/chrome` was **not** added. `apps/extension` hand-writes
+  ambient declarations for exactly the `chrome.*` members it calls
+  (`src/chrome/chrome-api.d.ts`), so that file doubles as the reviewable
+  list of platform APIs the extension depends on. The risk of
+  hand-written types drifting from the runtime is covered by exercising
+  every one of them against a real Chromium in `e2e/`. If that surface
+  ever grows past a page or two, reconsider.
 
 ## TypeScript conventions
 
@@ -145,10 +176,13 @@ for why each is enabled. Within that:
   files are TypeScript, run directly via Node's type stripping.
 - Prefer returning diagnostics over throwing: one malformed resource
   should not fail parsing an entire archive.
+- `playwright` is used only inside `apps/extension/e2e/`, and only to
+  drive a real browser. It is not a general-purpose test tool for this
+  repository: nothing outside that directory should import it.
 - See [docs/architecture.md#testing](docs/architecture.md#testing) for
   the full fixture-layer strategy (unit → golden fixtures → bug
-  regression fixtures → round-trip → malformed-input → extension
-  integration → opt-in real-world corpus).
+  regression fixtures → round-trip → malformed-input → browser extension
+  E2E → opt-in real-world corpus).
 
 ## npm scripts
 
@@ -160,12 +194,56 @@ Run from the repo root:
 - `npm run lint` — Biome check (format, lint, and import-sorting diagnostics; no writes)
 - `npm run format` — Biome check --write (applies formatting, import sorting, and safe lint fixes)
 - `npm run check:filenames` — verifies file/directory naming policy (see File and directory naming)
-- `npm run check` — typecheck + test + lint + check:filenames + build (the pre-PR gate)
+- `npm run check` — build + typecheck + test + lint + check:filenames (the pre-PR gate)
+- `npm run test:e2e` — the extension's browser E2E suite (opt-in, see below)
 
-`packages/archivebridge` exposes the same script names (plus `check` and
-`clean`) so it can be run standalone. `apps/extension` exposes
-`build`/`typecheck`/`lint`/`format` the same way, but has no `test` or
-`check` script yet since the extension has no tests to run.
+**`build` runs first in `check`, and has to.** `apps/extension` consumes
+`@xarsh/archivebridge` as a published package would — through its
+`exports` map, from `dist/` — so both its typecheck and its tests need the
+library built. Building first keeps that dependency explicit instead of
+depending on a stale `dist/` happening to be lying around.
+
+Both workspaces expose the same script names (plus `check` and `clean`)
+so either can be run standalone.
+
+## Extension E2E tests
+
+`apps/extension/e2e/` loads the **real built extension** into a real
+Chromium, captures a deterministic local page, saves it in both formats,
+and verifies the resulting bytes with `@xarsh/archivebridge` itself.
+There is no fake `chrome` object and no test-only branch in `src/`.
+
+```sh
+npx playwright install chromium   # once
+npm run build
+npm run test:e2e
+```
+
+It is **not** part of `npm run check`, because it needs a browser binary
+that the unit-test gate must not require. It has its own CI job instead.
+
+Three rules for anything added here:
+
+- **Assert on bytes, not on dialogs.** The suite drives the production
+  save path unmodified — including `saveAs: true` — and the download
+  completes because Playwright *replaces* Chrome's download pipeline, so
+  there is neither a chooser nor a filename-determination step (it is not,
+  as it looks, headless Chromium auto-accepting a chooser). Never make an
+  OS file chooser a CI gate. A test that needs a download to sit *pending*
+  has to ask for Chrome's own pipeline back and give up asserting on
+  written bytes — see `e2e/save-lifecycle.test.ts`.
+- **One browser at a time.** `--test-concurrency=1` is deliberate.
+  `chrome.pageCapture.saveAsMHTML` writes through a temp file and
+  intermittently fails with `FILE_NOT_FOUND`/`ACCESS_DENIED` when two
+  browser sessions run at once (observed at roughly 1 run in 5), which
+  looks exactly like a product bug and is not one.
+- **Never add a branch to `src/` for a test's benefit.** If something is
+  hard to observe, the seam probably belongs in the product architecture
+  anyway (capture/convert bytes on one side, save through a browser
+  adapter on the other) — see docs/architecture.md, "The Chrome v0.1
+  pipeline". Where a test needs to reach past the extension it uses a real
+  Chrome API from a context of its own — an extension page, or the
+  browser's `Target` CDP domain — never a hook in `src/`.
 
 ## File and directory naming
 
@@ -198,9 +276,17 @@ it lands. See [fixtures/README.md](fixtures/README.md).
   surface.** Anything exported from `@xarsh/archivebridge`'s main entry
   point should be usable without assuming a Node.js runtime, even though
   the CLI (which does depend on Node) lives in the same package.
-- **`apps/extension` must not reimplement archive parsing/format
-  detection.** It consumes `@xarsh/archivebridge`; if that's not wired up
-  yet (see [docs/architecture.md](docs/architecture.md)'s WXT/bundler
-  note), keep the extension UI-only rather than duplicating logic.
+- **`apps/extension` must not reimplement archive parsing, conversion or
+  format detection.** It consumes `@xarsh/archivebridge`. All of its
+  archive logic is one module, `src/core/archive-bytes.ts`, and that
+  module's job is to call the library — not to know anything about MIME
+  or plists.
+- **`apps/extension/src/core/` stays free of browser APIs.** No
+  `chrome.*`, no DOM, no `navigator`. Per-browser platform code lives in
+  `src/chrome/` (and, later, `src/firefox/`, `src/safari/`). This is
+  enforced by the type checking split: `core/` is the only source
+  directory that compiles under both the browser tsconfig and the Node
+  one, and it is what lets the whole byte-generation path be tested
+  without a browser.
 - **Runtime dependency additions need a stated reason** — see Dependency
   policy above.
