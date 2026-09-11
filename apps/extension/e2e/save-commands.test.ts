@@ -282,7 +282,11 @@ describe('Chrome extension save commands', () => {
 	test('the same bytes run through the extension core outside the browser produce the same archives', async () => {
 		const captured = await save('mhtml')
 		const webarchive = archiveBytesFrom(captured, 'webarchive')
-		assert.equal(webarchive.fileName, `127.0.0.1-${new URL(server.origin).port}.webarchive`)
+		// The test page's title-setting script (test-page.ts) runs before capture
+		// and mutates <title>, so the saved name is title-derived, not URL-derived
+		// — see "G(dom)" above for the same post-script-DOM behavior applied to
+		// file naming.
+		assert.equal(webarchive.fileName, 'ArchiveBridge test page ready.webarchive')
 		assert.equal(detectArchiveFormatFromBytes(webarchive.bytes), 'webarchive')
 	})
 })

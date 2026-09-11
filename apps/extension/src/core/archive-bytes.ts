@@ -12,8 +12,8 @@
  *   is already canonical MHTML (see docs/architecture.md, "MHTML is the
  *   canonical format"), so re-serializing it through ArchiveBridge would
  *   only risk changing bytes the browser produced for no gain. Parsing
- *   still happens, but purely to read the page URL for the file name and
- *   to surface diagnostics.
+ *   still happens, but purely to read the page title/URL for the file
+ *   name and to surface diagnostics.
  * - **A parse problem never blocks an MHTML save.** The bytes came from
  *   the browser; refusing to write them because ArchiveBridge disliked
  *   something in them would be strictly worse for the user than writing
@@ -25,7 +25,7 @@
  * without any test-only branch in production code.
  */
 
-import { convertMhtmlToWebArchive, type Diagnostic, parseMhtml, serializeWebArchive } from '@xarsh/archivebridge'
+import { convertMhtmlToWebArchive, type Diagnostic, extractMhtmlRootTitle, parseMhtml, serializeWebArchive } from '@xarsh/archivebridge'
 import { archiveFileName, type SaveFormat } from './file-name.ts'
 
 /** The MIME types Chrome itself associates with these two formats (measured: it derives `.mht` from `application/x-mimearchive` when it declines to render one). Used only as the saved `Blob`'s type; the file name carries the authoritative extension. */
@@ -67,13 +67,14 @@ export class ArchiveConversionError extends Error {
 export function archiveBytesFrom(capturedMhtml: Uint8Array, format: SaveFormat): ArchiveBytes {
 	const parsed = parseMhtml(capturedMhtml)
 	const pageUrl = parsed.document === undefined ? undefined : parsed.document.parts[parsed.document.rootPartIndex]?.location
+	const pageTitle = parsed.document === undefined ? undefined : extractMhtmlRootTitle(parsed.document)
 
 	switch (format) {
 		case 'mhtml':
 			return {
 				format,
 				bytes: capturedMhtml,
-				fileName: archiveFileName(pageUrl, format),
+				fileName: archiveFileName(pageUrl, format, pageTitle),
 				mimeType: MIME_TYPES[format],
 				pageUrl,
 				diagnostics: parsed.diagnostics,
@@ -86,7 +87,7 @@ export function archiveBytesFrom(capturedMhtml: Uint8Array, format: SaveFormat):
 			return {
 				format,
 				bytes: serializeWebArchive(converted.document),
-				fileName: archiveFileName(pageUrl, format),
+				fileName: archiveFileName(pageUrl, format, pageTitle),
 				mimeType: MIME_TYPES[format],
 				pageUrl,
 				diagnostics: [...parsed.diagnostics, ...converted.diagnostics],

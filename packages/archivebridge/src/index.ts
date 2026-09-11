@@ -8,6 +8,7 @@
 export { convertWebArchiveToMhtml } from './convert/to-mhtml.ts'
 export { convertMhtmlToWebArchive } from './convert/to-web-archive.ts'
 export { detectArchiveFormatFromBytes, detectArchiveFormatFromFilename } from './format/detect.ts'
+export { extractMhtmlRootTitle } from './mhtml/html-title.ts'
 export { parseMhtml } from './mhtml/parse.ts'
 export { serializeMhtml } from './mhtml/serialize.ts'
 export type { ArchiveFormat, Diagnostic } from './model/archive.ts'

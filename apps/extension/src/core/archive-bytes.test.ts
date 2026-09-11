@@ -21,18 +21,61 @@ test('saving as MHTML passes the browser capture through byte for byte', () => {
 	assert.equal(archive.mimeType, 'application/x-mimearchive')
 })
 
-test('the MHTML file name comes from the capture own main-resource URL', () => {
+test('the file name comes from the capture own root part title, not its URL', () => {
 	const archive = archiveBytesFrom(chromeCapture, 'mhtml')
 	assert.equal(archive.pageUrl, 'https://example.com/')
-	assert.equal(archive.fileName, 'example.com.mhtml')
+	assert.equal(archive.fileName, 'Example Domain.mhtml')
 })
 
 test('saving as WebArchive produces bytes ArchiveBridge recognizes as a WebArchive', () => {
 	const archive = archiveBytesFrom(chromeCapture, 'webarchive')
 	assert.equal(archive.format, 'webarchive')
-	assert.equal(archive.fileName, 'example.com.webarchive')
+	assert.equal(archive.fileName, 'Example Domain.webarchive')
 	assert.equal(archive.mimeType, 'application/x-webarchive')
 	assert.equal(detectArchiveFormatFromBytes(archive.bytes), 'webarchive')
+})
+
+test('MHTML and WebArchive saves of the same capture share the same title-derived stem', () => {
+	assert.equal(archiveBytesFrom(chromeCapture, 'mhtml').fileName, 'Example Domain.mhtml')
+	assert.equal(archiveBytesFrom(chromeCapture, 'webarchive').fileName, 'Example Domain.webarchive')
+})
+
+test('a capture whose root part has no title falls back to the URL-derived name', () => {
+	const noTitle = new TextEncoder().encode(
+		[
+			'MIME-Version: 1.0',
+			'Content-Type: multipart/related; boundary="B"',
+			'',
+			'--B',
+			'Content-Type: text/html',
+			'Content-Location: https://example.com/no-title',
+			'',
+			'<html><head></head><body>no title here</body></html>',
+			'--B--',
+			'',
+		].join('\r\n'),
+	)
+	const archive = archiveBytesFrom(noTitle, 'mhtml')
+	assert.equal(archive.fileName, 'example.com-no-title.mhtml')
+})
+
+test('a capture whose root part is not HTML falls back to the URL-derived name', () => {
+	const nonHtmlRoot = new TextEncoder().encode(
+		[
+			'MIME-Version: 1.0',
+			'Content-Type: multipart/related; boundary="B"',
+			'',
+			'--B',
+			'Content-Type: text/plain',
+			'Content-Location: https://example.com/plain',
+			'',
+			'<title>should not be read as a title</title>',
+			'--B--',
+			'',
+		].join('\r\n'),
+	)
+	const archive = archiveBytesFrom(nonHtmlRoot, 'mhtml')
+	assert.equal(archive.fileName, 'example.com-plain.mhtml')
 })
 
 test('the WebArchive keeps the captured main resource and subresources', () => {

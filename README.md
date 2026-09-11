@@ -112,6 +112,23 @@ What the viewer will and will not do, deliberately:
   works normally; one pointing at another file is refused and listed in the
   notes.
 
+## macOS and Safari
+
+On macOS, files saved through Chrome may receive the
+`com.apple.quarantine` extended attribute. Safari can refuse to load a
+quarantined `.webarchive`, showing a blank page even though the archive
+itself is readable.
+
+If an ArchiveBridge-created WebArchive opens blank in Safari, remove the
+quarantine attribute:
+
+```sh
+xattr -d com.apple.quarantine path/to/file.webarchive
+```
+
+This affects how the file is delivered from Chrome to Safari; it does not
+change the WebArchive contents.
+
 ## Planned
 
 - **Firefox and Safari** extension support. Both need an
