@@ -51,16 +51,32 @@ export async function writeFixture(directory: string, name: string, bytes: Uint8
  * result is JSON: a `Uint8Array` would arrive as an object with one key
  * per byte (the same platform fact that forces the offscreen document's
  * `BroadcastChannel` handoff — see `chrome/blob-url-channel.ts`).
+ *
+ * Retries on the same `NotFoundError` race documented in `src/chrome/
+ * capture.ts` — the `Blob` `saveAsMHTML` resolves with is backed by a temp
+ * file Chromium can reclaim before `arrayBuffer()` reads it, measured to
+ * happen far more often on a loaded CI runner than locally. This helper
+ * cannot import that module (it runs inside the browser via `evaluate`, not
+ * in Node), so the retry is duplicated here.
  */
 export async function captureMhtmlBytes(serviceWorker: Worker, tabId: number): Promise<Uint8Array> {
 	const base64 = await serviceWorker.evaluate(async (id) => {
-		const blob = await chrome.pageCapture.saveAsMHTML({ tabId: id })
-		const bytes = new Uint8Array(await blob.arrayBuffer())
-		let binary = ''
-		for (const byte of bytes) {
-			binary += String.fromCharCode(byte)
+		const CAPTURE_RETRIES = 3
+		for (let attempt = 1; ; attempt++) {
+			const blob = await chrome.pageCapture.saveAsMHTML({ tabId: id })
+			try {
+				const bytes = new Uint8Array(await blob.arrayBuffer())
+				let binary = ''
+				for (const byte of bytes) {
+					binary += String.fromCharCode(byte)
+				}
+				return btoa(binary)
+			} catch (error) {
+				if (!(error instanceof DOMException && error.name === 'NotFoundError') || attempt >= CAPTURE_RETRIES) {
+					throw error
+				}
+			}
 		}
-		return btoa(binary)
 	}, tabId)
 	return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
 }
