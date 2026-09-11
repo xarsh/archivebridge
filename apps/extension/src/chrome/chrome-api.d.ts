@@ -32,6 +32,32 @@ interface ChromeEvent<Listener extends (...args: never[]) => unknown> {
 	removeListener(listener: Listener): void
 }
 
+/** One `declarativeNetRequest` rule. Only the members the local-file interception rule sets are declared — see `chrome/file-interception.ts`. */
+interface ChromeDeclarativeNetRequestRule {
+	readonly id: number
+	readonly priority: number
+	readonly action: {
+		readonly type: 'redirect'
+		readonly redirect: { readonly regexSubstitution: string }
+	}
+	readonly condition: {
+		readonly regexFilter: string
+		readonly isUrlFilterCaseSensitive: boolean
+		readonly resourceTypes: readonly 'main_frame'[]
+	}
+}
+
+interface ChromeDeclarativeNetRequest {
+	/** Dynamic rules, not static `rule_resources`: the redirect target has to name this extension's own origin, which is not knowable until it is installed (see `chrome/file-interception.ts`). */
+	updateDynamicRules(options: { removeRuleIds?: readonly number[]; addRules?: readonly ChromeDeclarativeNetRequestRule[] }): Promise<void>
+}
+
+/** The `chrome.extension` remnant MV3 keeps. Only the one member the viewer needs is declared. */
+interface ChromeExtension {
+	/** Whether the user has turned on this extension's "Allow access to file URLs" toggle. Off by default for a normally-installed extension. */
+	isAllowedFileSchemeAccess(): Promise<boolean>
+}
+
 interface ChromeRuntime {
 	/** The extension's own ID. Reading it is the standard way to check whether an extension context is still valid. */
 	readonly id: string
@@ -108,6 +134,8 @@ interface ChromeAction {
 
 interface Chrome {
 	readonly runtime: ChromeRuntime
+	readonly declarativeNetRequest: ChromeDeclarativeNetRequest
+	readonly extension: ChromeExtension
 	readonly pageCapture: ChromePageCapture
 	readonly offscreen: ChromeOffscreen
 	readonly downloads: ChromeDownloads

@@ -48,6 +48,16 @@ interface ChromeDownloads {
 	>
 }
 
+interface ChromeDeclarativeNetRequest {
+	/**
+	 * Test-only: production installs the interception rule and never reads it
+	 * back. A test reads it back so that what Chrome actually holds — the
+	 * pattern, the resource type, the substitution — is asserted against the
+	 * live browser rather than against the source that asked for it.
+	 */
+	getDynamicRules(): Promise<readonly ChromeDeclarativeNetRequestRule[]>
+}
+
 interface ChromeTabs {
 	/**
 	 * Test-only: production code only ever *reads* the active tab via

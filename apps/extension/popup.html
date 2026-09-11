@@ -42,12 +42,21 @@
 			#status.error {
 				color: #b3261e;
 			}
+			#file-access {
+				margin: 6px 0 0;
+				padding-top: 6px;
+				border-top: 1px solid color-mix(in srgb, canvastext 18%, transparent);
+				font-size: 11px;
+				line-height: 1.4;
+				color: color-mix(in srgb, canvastext 65%, transparent);
+			}
 		</style>
 	</head>
 	<body>
 		<button id="save-mhtml" type="button">Save as MHTML&hellip;</button>
 		<button id="save-webarchive" type="button">Save as WebArchive&hellip;</button>
 		<p id="status"></p>
+		<p id="file-access" hidden></p>
 		<script type="module" src="popup.js"></script>
 	</body>
 </html>

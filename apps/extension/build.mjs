@@ -6,12 +6,13 @@
 //
 // - The extension now imports `@xarsh/archivebridge`, so `tsc` alone is no
 //   longer enough: the library and its dependency graph have to be bundled
-//   into each extension context (a service worker, an offscreen document
-//   and a popup, none of which can resolve bare npm specifiers).
+//   into each extension context (a service worker, an offscreen document,
+//   a popup and the archive viewer, none of which can resolve bare npm
+//   specifiers).
 // - esbuild does exactly that and nothing else. A WebExtension framework
 //   (WXT and friends) would additionally own the manifest, the dev server,
 //   per-browser output and an HTML pipeline — none of which this extension
-//   needs: it has one hand-written manifest, three entry points and two
+//   needs: it has one hand-written manifest, four entry points and three
 //   static HTML files. See docs/architecture.md, "Building the extension".
 // - Using esbuild's JS API keeps the build one readable file, and has the
 //   side benefit of not needing the `esbuild` package's postinstall step
@@ -31,13 +32,14 @@ import { build } from 'esbuild'
 const root = dirname(fileURLToPath(import.meta.url))
 const outDir = join(root, 'dist')
 
-const STATIC_FILES = ['manifest.json', 'popup.html', 'offscreen.html']
+const STATIC_FILES = ['manifest.json', 'popup.html', 'offscreen.html', 'viewer.html']
 
-/** The three extension contexts. Each is its own bundle: they load independently and share no module instance at runtime. */
+/** The four extension contexts. Each is its own bundle: they load independently and share no module instance at runtime. */
 const ENTRY_POINTS = {
 	background: 'src/chrome/background.ts',
 	offscreen: 'src/chrome/offscreen.ts',
 	popup: 'src/popup/popup.ts',
+	viewer: 'src/viewer/viewer.ts',
 }
 
 /** Set `ARCHIVEBRIDGE_EXTENSION_MINIFY=0` to build readable output — useful when debugging a bundled service worker in Chrome DevTools. */

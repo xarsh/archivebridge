@@ -14,8 +14,16 @@
  * permission-gated fields, and the file name is derived from the archive
  * bytes instead precisely so they are never needed (see
  * `core/file-name.ts`).
+ *
+ * The one thing here that is not a save command is a single line about
+ * local file access, shown only when Chrome's per-extension "Allow access
+ * to file URLs" toggle is off. Opening a local `.webarchive` silently does
+ * nothing useful in that state, and this is the only surface the user
+ * reliably sees beforehand. It is a sentence, not a settings screen:
+ * nothing here can change the toggle, because only the user can.
  */
 
+import { FILE_ACCESS_HINT, isFileAccessAllowed } from '../chrome/local-archive.ts'
 import type { SaveFormat } from '../core/file-name.ts'
 
 function requireElement<T extends Element>(id: string, elementType: new () => T): T {
@@ -67,3 +75,17 @@ for (const [format, button] of buttons) {
 		void requestSave(format)
 	})
 }
+
+async function showFileAccessNote(): Promise<void> {
+	if (await isFileAccessAllowed()) {
+		return
+	}
+	const note = document.getElementById('file-access')
+	if (note === null) {
+		return
+	}
+	note.textContent = `To open local .webarchive files: ${FILE_ACCESS_HINT}`
+	note.hidden = false
+}
+
+void showFileAccessNote()

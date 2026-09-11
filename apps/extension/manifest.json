@@ -2,9 +2,13 @@
 	"manifest_version": 3,
 	"name": "ArchiveBridge",
 	"version": "0.1.0",
-	"description": "Save the current page as MHTML or Safari WebArchive.",
+	"description": "Save the current page as MHTML or Safari WebArchive, and open local .webarchive files that Chrome cannot display itself.",
 	"minimum_chrome_version": "116",
-	"permissions": ["pageCapture", "downloads", "offscreen", "contextMenus"],
+	"permissions": ["pageCapture", "downloads", "offscreen", "contextMenus", "declarativeNetRequest"],
+	"host_permissions": ["file:///*"],
+	"content_security_policy": {
+		"extension_pages": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src blob: data:; font-src blob: data:; media-src blob: data:; frame-src blob:; object-src 'none'; connect-src file:; form-action 'none'; base-uri 'none'"
+	},
 	"background": {
 		"service_worker": "background.js",
 		"type": "module"

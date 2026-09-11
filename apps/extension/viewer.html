@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>ArchiveBridge</title>
+		<style>
+			:root {
+				color-scheme: light dark;
+			}
+			html,
+			body {
+				height: 100%;
+			}
+			body {
+				display: flex;
+				flex-direction: column;
+				margin: 0;
+				font: 13px system-ui, sans-serif;
+				color: canvastext;
+				background: canvas;
+			}
+			/* The viewer's own chrome is one thin line. The archive gets the rest. */
+			#bar {
+				display: flex;
+				flex: none;
+				gap: 8px;
+				align-items: baseline;
+				padding: 4px 10px;
+				border-bottom: 1px solid color-mix(in srgb, canvastext 18%, transparent);
+				background: color-mix(in srgb, canvastext 4%, transparent);
+			}
+			#source {
+				flex: 1;
+				overflow: hidden;
+				white-space: nowrap;
+				text-overflow: ellipsis;
+			}
+			#notes-toggle {
+				flex: none;
+				padding: 1px 8px;
+				font: inherit;
+				color: inherit;
+				background: color-mix(in srgb, canvastext 8%, transparent);
+				border: 1px solid color-mix(in srgb, canvastext 25%, transparent);
+				border-radius: 999px;
+				cursor: pointer;
+			}
+			#notes {
+				flex: none;
+				max-height: 30vh;
+				margin: 0;
+				padding: 6px 10px 6px 26px;
+				overflow-y: auto;
+				font-size: 12px;
+				color: color-mix(in srgb, canvastext 70%, transparent);
+				border-bottom: 1px solid color-mix(in srgb, canvastext 18%, transparent);
+			}
+			#notes li {
+				overflow-wrap: anywhere;
+			}
+			#archive {
+				flex: 1;
+				width: 100%;
+				border: 0;
+				background: white;
+			}
+			#failure {
+				flex: 1;
+				padding: 48px 24px;
+				margin: 0 auto;
+				max-width: 40em;
+			}
+			#failure h1 {
+				font-size: 17px;
+				margin: 0 0 8px;
+			}
+			#failure p {
+				margin: 0 0 8px;
+				color: color-mix(in srgb, canvastext 70%, transparent);
+				overflow-wrap: anywhere;
+			}
+			/* The UA rule for [hidden] is one selector weaker than the id rules above, so it needs restating at matching specificity rather than with !important. */
+			#bar[hidden],
+			#notes[hidden],
+			#archive[hidden],
+			#failure[hidden],
+			#notes-toggle[hidden],
+			#failure-hint[hidden] {
+				display: none;
+			}
+		</style>
+	</head>
+	<body>
+		<div id="bar" hidden>
+			<span id="source"></span>
+			<button id="notes-toggle" type="button" hidden></button>
+		</div>
+		<ul id="notes" hidden></ul>
+		<!--
+			The archive renders here and nowhere else. `sandbox` is set in the
+			markup rather than from script so that the isolation is a property of
+			the page itself, reviewable without reading the bundle — and so that
+			`src/core/viewer-policy.test.ts` can assert on exactly this string.
+			See src/core/viewer-policy.ts for why `allow-same-origin` is the only
+			token, and why every other one is absent.
+		-->
+		<iframe id="archive" sandbox="allow-same-origin" title="Archived page" hidden></iframe>
+		<section id="failure" hidden>
+			<h1 id="failure-title">Nothing to show</h1>
+			<p id="failure-detail"></p>
+			<p id="failure-hint" hidden></p>
+		</section>
+		<script type="module" src="viewer.js"></script>
+	</body>
+</html>

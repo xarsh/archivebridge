@@ -84,19 +84,30 @@ describe('Chrome extension save commands', () => {
 		assert.deepEqual(surface, { pageCapture: 'function', downloads: 'function', offscreen: 'function', contextMenus: 'function', createObjectURL: 'undefined' })
 	})
 
-	test('H. the extension holds no host permissions, at build time or at runtime', async () => {
+	test('H. saving still needs no web-origin permission of any kind', async () => {
+		// The save path's permission claim is unchanged by the viewer: capture and
+		// download of an ordinary `http(s)` tab need no host permission at all.
+		// The one host permission the extension now holds is `file:///*`, which
+		// exists solely so a local `.webarchive` can be intercepted and read (see
+		// `e2e/viewer.test.ts` and `chrome/file-interception.ts`); it grants
+		// nothing over any site.
 		const manifest = JSON.parse(await readFile(join(builtExtensionDir, 'manifest.json'), 'utf8')) as {
-			host_permissions?: unknown
+			host_permissions?: readonly string[]
 			optional_host_permissions?: unknown
 			permissions?: unknown
 		}
-		assert.equal(manifest.host_permissions, undefined)
+		assert.deepEqual(manifest.host_permissions, ['file:///*'])
 		assert.equal(manifest.optional_host_permissions, undefined)
-		assert.deepEqual(manifest.permissions, ['pageCapture', 'downloads', 'offscreen', 'contextMenus'])
+		assert.deepEqual(manifest.permissions, ['pageCapture', 'downloads', 'offscreen', 'contextMenus', 'declarativeNetRequest'])
 
 		const granted = await session.serviceWorker.evaluate(async () => await chrome.permissions.getAll())
-		assert.deepEqual(granted.origins, [])
-		assert.deepEqual([...(granted.permissions ?? [])].sort(), ['contextMenus', 'downloads', 'offscreen', 'pageCapture'])
+		assert.deepEqual(granted.origins, ['file:///*'])
+		assert.deepEqual(
+			[...(granted.origins ?? [])].filter((origin) => origin.startsWith('http')),
+			[],
+			'the save path must never acquire a web origin',
+		)
+		assert.deepEqual([...(granted.permissions ?? [])].sort(), ['contextMenus', 'declarativeNetRequest', 'downloads', 'offscreen', 'pageCapture'])
 	})
 
 	test('C+D. Save as MHTML writes a multi-megabyte capture that ArchiveBridge parses', async () => {

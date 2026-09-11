@@ -3,7 +3,7 @@
 	"version": "0.1.0",
 	"private": true,
 	"license": "MIT",
-	"description": "ArchiveBridge browser extension: saves the current page as MHTML or Safari WebArchive. Chrome/Edge implemented; Firefox and Safari are planned first-class targets.",
+	"description": "ArchiveBridge browser extension: saves the current page as MHTML or Safari WebArchive, and views local .webarchive files. Chrome/Edge implemented; Firefox and Safari are planned first-class targets.",
 	"type": "module",
 	"scripts": {
 		"build": "node build.mjs",

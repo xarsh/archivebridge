@@ -58,7 +58,9 @@ floor never stops being the tested floor.
 - `parse5` is used to locate `<iframe>`/`<frame>` `src` attributes,
   effective `<base href>`, and declarative Shadow DOM frame traversal
   when flattening/reconstructing frames during WebArchive ⇄ MHTML
-  conversion (`mhtml/html-rewrite.ts`). It's used purely to find exact
+  conversion (`mhtml/html-rewrite.ts`) — and, for the archive viewer, to
+  locate *every* attribute and `<style>` body it has to rewrite
+  (`view/html-sites.ts`). It's used purely to find exact
   source-string offsets (`sourceCodeLocationInfo`), never to re-serialize
   the document — only the located attribute span is spliced, so nothing
   else about the HTML changes. A hand-rolled scanner would need to
@@ -69,6 +71,27 @@ floor never stops being the tested floor.
   jsdom and Deno use for the same job. One transitive dependency
   (`entities`). See docs/architecture.md, "Frame representation" for the
   full evaluation.
+- **No CSS parser**, and that is a decision rather than an omission. The
+  viewer rewrites `url()` and `@import` inside archived stylesheets with a
+  small hand-written scanner (`view/css-rewrite.ts`) over CSS Syntax Level
+  3's relevant tokenizer states: comments, strings, url tokens, and ident
+  sequences. That last one is not optional — identifiers may be written
+  with escapes and the spec compares a token's *decoded* value, so
+  `u\72l(` and `@\69mport` are real spellings that Chromium loads, and a
+  scanner matching raw keyword bytes ships them unrewritten. The scanner
+  also tracks which function a string token sits in, because a bare string
+  in `image-set()` is a URL — including one written in a `var()`/`env()`/
+  `if()` fallback inside that call, which substitution puts in the same
+  place. What it deliberately does not do is evaluate the cascade: a string
+  carried into an `image-set()` by a custom property defined elsewhere is
+  rule 1's documented exception, where the viewer's CSP is the mandatory
+  mechanism. This is the
+  opposite conclusion from HTML above, for a stated reason: HTML
+  tokenization has tree-construction feedback where "which text is markup"
+  depends on the parse, while a `url(` inside a CSS comment or string is
+  unreachable from these flat states. `postcss`/`css-tree`/`lightningcss`
+  would each be an order of magnitude larger than the problem. See
+  docs/architecture.md, "Resource resolution and CSS".
 - `iconv-lite` is used for legacy (non-UTF-8) `textEncoding` decode/encode
   when resource HTML has to be decoded, edited (frame `src` rewriting),
   and re-encoded without changing its declared charset
@@ -101,7 +124,7 @@ floor never stops being the tested floor.
   esbuild does that one job; a WebExtension framework (WXT and similar)
   was evaluated and rejected because it would also take over the
   manifest, a dev server, per-browser output and an HTML pipeline for an
-  extension that has one manifest, three entry points and two HTML
+  extension that has one manifest, four entry points and three HTML
   files. See docs/architecture.md, "Building the extension".
 - `buffer` and `string_decoder` (dependencies of `apps/extension`) are
   bundle-time polyfills, needed only because `iconv-lite` is written
@@ -209,9 +232,15 @@ so either can be run standalone.
 ## Extension E2E tests
 
 `apps/extension/e2e/` loads the **real built extension** into a real
-Chromium, captures a deterministic local page, saves it in both formats,
-and verifies the resulting bytes with `@xarsh/archivebridge` itself.
-There is no fake `chrome` object and no test-only branch in `src/`.
+Chromium. It has two lanes. The **save** lane captures a deterministic
+local page, saves it in both formats, and verifies the resulting bytes
+with `@xarsh/archivebridge` itself. The **view** lane writes a real
+`.webarchive` to disk, navigates the browser to its `file://` URL, and
+asserts against the archived DOM Chrome laid out after the extension's own
+`declarativeNetRequest` rule redirected it — including that a hostile
+archive reaches the local beacon server zero times, by request *and* by
+TCP connection. There is no fake `chrome` object and no test-only branch
+in `src/`.
 
 ```sh
 npx playwright install chromium   # once
@@ -222,7 +251,7 @@ npm run test:e2e
 It is **not** part of `npm run check`, because it needs a browser binary
 that the unit-test gate must not require. It has its own CI job instead.
 
-Three rules for anything added here:
+Four rules for anything added here:
 
 - **Assert on bytes, not on dialogs.** The suite drives the production
   save path unmodified — including `saveAs: true` — and the download
@@ -237,6 +266,13 @@ Three rules for anything added here:
   intermittently fails with `FILE_NOT_FOUND`/`ACCESS_DENIED` when two
   browser sessions run at once (observed at roughly 1 run in 5), which
   looks exactly like a product bug and is not one.
+- **Hostile fixtures are hand-built, on purpose.** Blink's capture strips
+  `<script>` and drops `srcset`, so a browser-captured archive cannot
+  carry the content the security tests exist to prove is inert. The
+  hostile and resource fixtures in `e2e/viewer-fixtures.ts` are built
+  through the library's own public `serializeWebArchive` — which is also
+  the more realistic shape, since real `.webarchive` files come from
+  WebKit, whose capture keeps all of it.
 - **Never add a branch to `src/` for a test's benefit.** If something is
   hard to observe, the seam probably belongs in the product architecture
   anyway (capture/convert bytes on one side, save through a browser
@@ -276,11 +312,18 @@ it lands. See [fixtures/README.md](fixtures/README.md).
   surface.** Anything exported from `@xarsh/archivebridge`'s main entry
   point should be usable without assuming a Node.js runtime, even though
   the CLI (which does depend on Node) lives in the same package.
-- **`apps/extension` must not reimplement archive parsing, conversion or
-  format detection.** It consumes `@xarsh/archivebridge`. All of its
-  archive logic is one module, `src/core/archive-bytes.ts`, and that
-  module's job is to call the library — not to know anything about MIME
-  or plists.
+- **`apps/extension` must not reimplement archive parsing, conversion,
+  format detection or archive-content rewriting.** It consumes
+  `@xarsh/archivebridge`. Its save path's archive logic is one module,
+  `src/core/archive-bytes.ts`, and its viewer's is one call to
+  `renderMhtml`; both jobs are to call the library, not to know anything
+  about MIME, plists, HTML offsets or CSS tokens. This is also why the
+  viewer's reconstruction lives in `packages/archivebridge/src/view/`
+  despite being a product feature of the extension: it is browser-neutral
+  (its one platform dependency is an injected `createResourceUrl`
+  callback), it needs `parse5` and the charset codecs, and putting it here
+  is what keeps the later Firefox and Safari viewers a different loader
+  rather than a second implementation.
 - **`apps/extension/src/core/` stays free of browser APIs.** No
   `chrome.*`, no DOM, no `navigator`. Per-browser platform code lives in
   `src/chrome/` (and, later, `src/firefox/`, `src/safari/`). This is

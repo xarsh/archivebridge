@@ -20,6 +20,13 @@
  * serialized because two concurrent saves would race over each other's
  * blob URLs.
  *
+ * The worker also registers this extension's two browser integrations on
+ * install and on startup: the page context menu, and the
+ * `declarativeNetRequest` rule that redirects a local `.webarchive`
+ * navigation into the archive viewer (`chrome/file-interception.ts`).
+ * Neither is part of the save path; both are registrations the browser
+ * keeps for us.
+ *
  * There is one more listener, and it is not an entry point but an *exit*:
  * a global-scope `downloads.onChanged` handler that finishes a save whose
  * worker Chrome terminated before the download was done. See its comment
@@ -34,6 +41,7 @@
 import { ArchiveConversionError, archiveBytesFrom } from '../core/archive-bytes.ts'
 import type { SaveFormat } from '../core/file-name.ts'
 import { captureMhtml } from './capture.ts'
+import { installFileInterception } from './file-interception.ts'
 import { type AdoptedSave, adoptSettledDownload, releaseOffscreenDocument, type SaveResult, saveBytes, settleAwaitedDownload } from './save.ts'
 
 /** Context-menu item IDs. Also the wire form of a save request from the popup. */
@@ -253,8 +261,25 @@ function installContextMenus(): void {
 	})
 }
 
-chrome.runtime.onInstalled.addListener(installContextMenus)
-chrome.runtime.onStartup.addListener(installContextMenus)
+/**
+ * Everything this extension registers with the browser rather than does on
+ * demand: the two context-menu entries, and the `declarativeNetRequest` rule
+ * that turns opening a local `.webarchive` into an ArchiveBridge viewer tab.
+ *
+ * Both run on install *and* on browser startup. Neither needs to run on every
+ * worker start — a context menu and a dynamic DNR rule both outlive the
+ * worker — and re-registering is idempotent, so running twice costs nothing
+ * while never running would leave the feature missing.
+ */
+function installBrowserIntegrations(): void {
+	installContextMenus()
+	installFileInterception().catch((error: unknown) => {
+		console.error('ArchiveBridge: could not install local .webarchive interception', error)
+	})
+}
+
+chrome.runtime.onInstalled.addListener(installBrowserIntegrations)
+chrome.runtime.onStartup.addListener(installBrowserIntegrations)
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
 	const format = (['mhtml', 'webarchive'] as const).find((candidate) => MENU_ITEM_IDS[candidate] === info.menuItemId)

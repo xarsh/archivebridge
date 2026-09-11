@@ -8,11 +8,15 @@
  * site (CONTRIBUTING.md/architecture.md: no external network in normal
  * CI).
  *
- * The server also records every request it receives. Nothing asserts on
- * that yet, but it is the hook the eventual archive viewer needs: the
- * viewer must make *zero* requests for archived content, and the only
- * honest way to test "no network fallback" is to have a server that can
- * say it was never called. See docs/architecture.md, "Archive viewer".
+ * The server records every request it receives **and every TCP connection
+ * opened to it**, which is what turns the viewer's "no external network
+ * fallback" rule into an assertion rather than an aspiration. Both are
+ * needed: an HTTP request covers `<img>`, `fetch`, a stylesheet and a
+ * frame, but `<link rel=preconnect>` and `rel=dns-prefetch` open a
+ * connection *without* sending a request, and no CSP fetch directive
+ * governs them — so a viewer that only counted requests would call itself
+ * silent while talking to a server. See docs/architecture.md, "Archive
+ * viewer".
  *
  * One origin is served on two hostnames so the page can embed a genuinely
  * cross-origin frame: `127.0.0.1` and `localhost` are different origins to
@@ -91,6 +95,71 @@ export const imageBytes: Buffer = deterministicPng(IMAGE_SIDE)
 
 const STYLESHEET = 'body { background: #fff; color: #111; font-family: system-ui, sans-serif; }\n'
 
+/**
+ * The page the *viewer* tests capture, at `/viewer/`.
+ *
+ * It is deliberately separate from `/`: the save suite asserts on exactly
+ * what `/` produces, and a viewer needs things a save test does not (an
+ * attached shadow root, a `srcset`, a CSS background image, a nested
+ * frame at a different path). Keeping them apart means neither suite's
+ * fixture drifts because the other one needed something.
+ *
+ * Everything here is fixed, so a rendered assertion can name an exact
+ * colour, an exact string and an exact size.
+ *
+ * It deliberately has no `srcset`: Blink's capture **drops the attribute
+ * entirely** (measured — the element survives with neither `srcset` nor
+ * `src`), so a responsive image here could only ever assert a capture gap.
+ * `srcset` resolution is covered against a hand-built fixture instead, in
+ * `viewer-fixtures.ts`, which is also where a real Safari-produced one
+ * would come from.
+ */
+function viewerPages(origin: string): ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> {
+	return new Map([
+		[
+			'/viewer/',
+			{
+				contentType: 'text/html; charset=utf-8',
+				body: `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>ArchiveBridge viewer fixture</title><link rel="stylesheet" href="${origin}/viewer/style.css"></head>
+<body>
+<h1 id="heading">viewer fixture</h1>
+<p id="painted">painted</p>
+<img id="image" src="${origin}/image.png" width="64" height="64" alt="deterministic">
+<iframe id="frame" src="${origin}/viewer/frame.html"></iframe>
+<div id="shadow-host"></div>
+<a id="external-link" href="https://example.invalid/away" target="_top">away</a>
+<script>
+	document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML =
+		'<p id="in-shadow">shadow content</p><img id="shadow-image" src="${origin}/image.png" width="16" height="16">'
+	addEventListener('load', () => { document.title = 'ArchiveBridge test page ready' })
+</script>
+</body>
+</html>
+`,
+			},
+		],
+		[
+			'/viewer/style.css',
+			{
+				contentType: 'text/css; charset=utf-8',
+				// The colour and the background image are what a rendered assertion
+				// checks: the first proves an archived stylesheet applied at all, the
+				// second that a url() inside it resolved to archived bytes.
+				body: `h1{color:rgb(1,2,3)}\n#painted{background-image:url(${origin}/image.png);width:11px}\n`,
+			},
+		],
+		[
+			'/viewer/frame.html',
+			{
+				contentType: 'text/html; charset=utf-8',
+				body: '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>viewer frame</title></head><body><p id="framed">framed content</p></body></html>\n',
+			},
+		],
+	])
+}
+
 /** Path -> body/content type. The main page's `load` handler renames the document so a test can wait for a fully settled page before capturing. */
 function pages(mainOrigin: string, crossOrigin: string): ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> {
 	return new Map([
@@ -138,6 +207,7 @@ function pages(mainOrigin: string, crossOrigin: string): ReadonlyMap<string, { r
 		],
 		['/style.css', { contentType: 'text/css; charset=utf-8', body: STYLESHEET }],
 		['/image.png', { contentType: 'image/png', body: imageBytes }],
+		...viewerPages(mainOrigin),
 	])
 }
 
@@ -146,8 +216,12 @@ export interface TestServer {
 	readonly origin: string
 	/** A different origin serving the same server, for the cross-origin frame. */
 	readonly crossOrigin: string
-	/** Every path requested so far, in order. The hook for future "the viewer made no requests" assertions. */
+	/** Every path requested so far, in order. Half of the "the viewer made no requests" assertion. */
 	readonly requests: readonly string[]
+	/** How many TCP connections have been accepted. The other half: `preconnect`/`dns-prefetch` connect without ever sending a request. */
+	connectionCount(): number
+	/** Forgets every recorded request and connection, so a test can assert on one interaction rather than on the whole session. */
+	resetTraffic(): void
 	/** URLs the captured archive is expected to contain a part for. */
 	readonly expectedResourceUrls: readonly string[]
 	close(): Promise<void>
@@ -156,6 +230,7 @@ export interface TestServer {
 /** Starts the test server on an ephemeral port. */
 export async function startTestServer(): Promise<TestServer> {
 	const requests: string[] = []
+	let connections = 0
 	let routes: ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> = new Map()
 
 	const server: Server = createServer((request, response) => {
@@ -171,6 +246,10 @@ export async function startTestServer(): Promise<TestServer> {
 		response.end(route.body)
 	})
 
+	server.on('connection', () => {
+		connections += 1
+	})
+
 	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
 	const { port } = server.address() as AddressInfo
 	const origin = `http://127.0.0.1:${port}`
@@ -181,6 +260,11 @@ export async function startTestServer(): Promise<TestServer> {
 		origin,
 		crossOrigin,
 		requests,
+		connectionCount: () => connections,
+		resetTraffic: () => {
+			requests.length = 0
+			connections = 0
+		},
 		expectedResourceUrls: [
 			`${origin}/`,
 			`${origin}/style.css`,

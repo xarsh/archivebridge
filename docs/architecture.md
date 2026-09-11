@@ -19,22 +19,23 @@ built. To read it accurately:
 **Implemented.** The library (`packages/archivebridge`): MHTML and
 WebArchive parsing and serialization, direct WebArchive ⇄ MHTML
 conversion, frame flattening/reconstruction, the metadata sidecar,
-diagnostics, and format detection — plus the `archivebridge inspect` and
-`archivebridge convert` CLI subcommands built on top of them. And, as of
-v0.1, the **Chrome/Edge extension's capture and save**: the current page
-saved as MHTML or WebArchive from a toolbar popup or the page context
-menu.
+diagnostics, format detection, and the **archive-viewer reconstruction**
+(`renderMhtml`) — plus the `archivebridge inspect` and
+`archivebridge convert` CLI subcommands built on top of them. And, in the
+**Chrome/Edge extension**: capture and save (the current page saved as
+MHTML or WebArchive from a toolbar popup or the page context menu), and
+the **local WebArchive viewer** (opening a `file:///….webarchive` renders
+it in a sandboxed frame from archived bytes alone).
 
-**Planned.** The extension's **archive viewer**, its **Firefox and Safari**
-capture/save adapters, and a `validate` command.
+**Planned.** The extension's **Firefox and Safari** capture/save adapters
+and their viewers, and a `validate` command.
 
-Sections below discussing `validate`, the viewer, or non-Chromium
-browsers are specifying where that functionality will fit and what
-invariants it must respect, not describing code that exists. They are
-marked where the distinction could otherwise be missed. The commitment
-that Chrome, Edge, Firefox, and Safari are all first-class targets is an
-architectural constraint that holds now and binds the implementation
-whenever it lands.
+Sections below discussing `validate` or non-Chromium browsers are
+specifying where that functionality will fit and what invariants it must
+respect, not describing code that exists. They are marked where the
+distinction could otherwise be missed. The commitment that Chrome, Edge,
+Firefox, and Safari are all first-class targets is an architectural
+constraint that holds now and binds the implementation whenever it lands.
 
 ## Goals
 
@@ -96,7 +97,13 @@ separate concerns on purpose:
   (`value`/`checked`/`selected` set via JS), `<canvas>` pixel content,
   `adoptedStyleSheets`/constructed stylesheets, or `<link rel=preload>`
   resources never inserted into the DOM (the markup reference survives;
-  the bytes do not).
+  the bytes do not). It also **drops `srcset` outright**: a responsive
+  `<img>` comes back with neither `srcset` nor `src`, so the element
+  survives as a permanently broken image (measured on Chromium 153). A
+  reader must therefore not treat "no `srcset` in the archive" as evidence
+  the page had none, and the viewer's `srcset` handling is exercised
+  against hand-built archives — which is also what a Safari-produced
+  `.webarchive` looks like, since WebKit does keep it.
 - **Blink serializes an attached shadow root as a `<template>` carrying
   the legacy pre-standard attribute `shadowmode="open"`, not the
   standardized `shadowrootmode`.** No current browser hydrates
@@ -967,9 +974,12 @@ Archive files are untrusted input. Concretely:
   ArchiveBridge doesn't have, that's an `unresolved-resource` diagnostic,
   not a fetch.
 - Archived HTML must never be executed in an extension's privileged
-  origin. A future renderer must run archived content in a sandboxed
-  context (e.g. a sandboxed iframe / restricted origin), never in the
-  extension's own page.
+  origin. The viewer renders archived content in a sandboxed iframe with
+  no `allow-scripts`, never in the extension's own page, and rewrites
+  every statically identifiable reference before the browser sees it —
+  CSP is the mandatory backstop for the one class of reference whose
+  meaning is synthesized only by browser runtime semantics — see "Archive
+  viewer" below for the full contract.
 - Malformed input must not cause infinite loops (e.g. a multipart parser
   must make bounded progress per iteration; a boundary that never
   terminates is a diagnostic, not a hang).
@@ -1060,9 +1070,10 @@ diagnostics.
 
 ## Browser extension: capture and save are separate per-browser concerns
 
-> **Status: Chrome/Edge implemented (v0.1); Firefox and Safari planned.**
-> The Chrome extension saves the current page as MHTML or WebArchive. It
-> is not yet a viewer — see "Archive viewer" below.
+> **Status: Chrome/Edge implemented; Firefox and Safari planned.** The
+> Chrome extension saves the current page as MHTML or WebArchive, and
+> opens local `.webarchive` files in a viewer of its own — see "Archive
+> viewer" below.
 
 ### What the browser already does, and what is left for ArchiveBridge
 
@@ -1156,13 +1167,17 @@ directly on real captured bytes with no browser involved — and what makes
 adding Firefox a matter of swapping the two adapters rather than writing a
 second pipeline.
 
-**Permissions are `pageCapture`, `downloads`, `offscreen`, `contextMenus`,
-and deliberately nothing else.** In particular:
+**The save path's permissions are `pageCapture`, `downloads`, `offscreen`,
+`contextMenus`, and deliberately nothing else** (the viewer adds
+`declarativeNetRequest` and `file:///*` — see "Archive viewer" below, and
+note that neither is used by, or of any use to, the save path). In
+particular:
 
-- **No `host_permissions`.** Native capture of an ordinary `http(s)` tab
-  needs none, which is verified in the E2E suite at both build time (the
-  built manifest) and runtime (`chrome.permissions.getAll().origins` is
-  empty).
+- **No web-origin host permission, ever.** Native capture of an ordinary
+  `http(s)` tab needs none, which is verified in the E2E suite at both
+  build time (the built manifest) and runtime
+  (`chrome.permissions.getAll().origins` contains `file:///*` and nothing
+  matching `http`).
 - **No `tabs`/`activeTab`.** `chrome.tabs.query` returns a tab's `id`
   without any permission; `url` and `title` are the gated fields. The
   download file name is derived from the *archive's own* main-resource
@@ -1289,18 +1304,18 @@ failure mode is an extension that silently never starts.
 
 ### Building the extension: esbuild, not a framework
 
-`apps/extension` now imports `@xarsh/archivebridge`, so `tsc` alone is no
-longer enough — the library and its dependency graph have to be bundled
-into each of the three extension contexts (service worker, offscreen
-document, popup), none of which can resolve a bare npm specifier.
+`apps/extension` imports `@xarsh/archivebridge`, so `tsc` alone is not
+enough — the library and its dependency graph have to be bundled into each
+of the four extension contexts (service worker, offscreen document, popup,
+archive viewer), none of which can resolve a bare npm specifier.
 
 **esbuild does exactly that and nothing more**, driven by a single
-`build.mjs` that bundles the three entry points and copies
-`manifest.json`, `popup.html` and `offscreen.html`. A WebExtension
-framework (WXT and similar) was considered and rejected: it would
-additionally own the manifest, a dev server, per-browser output variants
-and an HTML pipeline, none of which this extension has a use for — one
-hand-written manifest, three entry points, two static HTML files. That is
+`build.mjs` that bundles the four entry points and copies
+`manifest.json`, `popup.html`, `offscreen.html` and `viewer.html`. A
+WebExtension framework (WXT and similar) was considered and rejected: it
+would additionally own the manifest, a dev server, per-browser output
+variants and an HTML pipeline, none of which this extension has a use for
+— one hand-written manifest, four entry points, three static HTML files. That is
 a lot of machinery to adopt in exchange for a file copy, and it would put
 a framework's conventions between this project and the extension platform
 whose exact behavior (see the MV3 notes above) it depends on knowing.
@@ -1320,7 +1335,12 @@ silently change what the library does with a non-UTF-8 resource, which is
 exactly the class of silent-charset bug `mhtml/text-codec.ts` exists to
 prevent. The charset tables dominate the bundle (~400 kB of ~700 kB), and
 that is an acceptable price for the library behaving identically in both
-runtimes.
+runtimes. Because each context is its own bundle (`splitting: false` —
+they load independently and share no module instance), the service worker
+and the viewer each carry their own copy; that is a one-time install cost
+for an extension, not a per-page download, and sharing a chunk between an
+MV3 service worker and a document is not something esbuild's code
+splitting can express anyway.
 
 This also sharpens CONTRIBUTING.md's boundary rule. "Nothing in the public
 API assumes Node" holds in the sense that matters — no `node:` imports, no
@@ -1341,18 +1361,19 @@ cross-browser extension and does not narrow the four-browser commitment.
 
 ## Archive viewer
 
-> **Status: planned, not implemented.** This section fixes the
-> architecture and the security constraints so the eventual
-> implementation has something to satisfy. No viewer code exists.
+> **Status: implemented for Chrome/Edge, for `.webarchive` only.** Chrome
+> renders `.mht`/`.mhtml` natively and ArchiveBridge deliberately does not
+> pre-empt it. Firefox and Safari viewers are planned; the reconstruction
+> half is already browser-neutral and waiting for them.
 
-The extension's second responsibility is to *view* local `.mht`,
-`.mhtml` and `.webarchive` files that the browser cannot display itself.
-The native situation is again complementary: Chrome/Edge render MHTML
-from `file://` natively but download `.webarchive`; Safari renders
-`.webarchive` natively but does nothing at all with `.mhtml` (a blank
-tab — consistent with LaunchServices, where Safari claims
-`com.apple.webarchive` but not `org.ietf.mhtml`); Firefox shows MHTML as
-plain text and downloads `.webarchive`.
+The extension's second responsibility is to *view* local archives the
+browser cannot display itself. The native situation is complementary:
+Chrome/Edge render MHTML from `file://` natively but download
+`.webarchive`; Safari renders `.webarchive` natively but does nothing at
+all with `.mhtml` (a blank tab — consistent with LaunchServices, where
+Safari claims `com.apple.webarchive` but not `org.ietf.mhtml`); Firefox
+shows MHTML as plain text and downloads `.webarchive`. So on Chrome the
+gap is exactly one format, and that is exactly what the viewer fills.
 
 ### The viewer must reconstruct, not delegate
 
@@ -1364,104 +1385,604 @@ render:
 <iframe src="archive.webarchive"> <!-- does not work -->
 ```
 
-Neither makes an unsupporting browser parse the format. Chrome renders
-MHTML *only* from `file://`: served over HTTP as `multipart/related` or
-`application/x-mimearchive`, or navigated to as a
+Neither makes an unsupporting browser parse the format, and an
+unsupported archive MIME type does not become supported by being inside
+an iframe. Chrome renders MHTML *only* from `file://`: served over HTTP as
+`multipart/related` or `application/x-mimearchive`, or navigated to as a
 `blob:chrome-extension://` URL with any of the three archive MIME types,
 it is downloaded rather than rendered — while the same blob labelled
 `text/html` renders fine, which proves the blob itself was navigable and
 the MIME type was the deciding factor. There is no way for the viewer to
 delegate to Chrome's own MHTML renderer.
 
-So the viewer has to reconstruct the document from ArchiveBridge's own
-parse:
+So the viewer reconstructs the document from ArchiveBridge's own parse:
 
 ```text
-archive bytes
-  -> ArchiveBridge parser (parseMhtml / parseWebArchive)
-  -> WebArchive converts to canonical MHTML if needed
-  -> resolve archive resources and frames from the flat part list
-  -> rewrite references to viewer-controlled resource URLs
-  -> render the reconstructed HTML in a sandboxed iframe
+local .webarchive bytes
+  -> parseWebArchive
+  -> convertWebArchiveToMhtml            (canonical MHTML, as everything else uses)
+  -> index parts by Content-Location / Content-ID
+  -> rewrite every reference in every live document and stylesheet
+     to a viewer-owned resource URL
+  -> render the reconstructed root document in a sandboxed iframe
 ```
 
 This is the same *shape* as PDF.js at the loader/viewer boundary — the
 extension owns parsing and resource resolution — but only there.
-**ArchiveBridge does not build a rendering engine**: layout, CSS and
-text remain the browser's own HTML/CSS engine's job. The viewer's output
-is HTML the browser lays out, not pixels ArchiveBridge draws.
+**ArchiveBridge does not build a rendering engine**: layout, CSS and text
+remain the browser's own HTML/CSS engine's job. The viewer's output is
+HTML the browser lays out, not pixels ArchiveBridge draws.
 
-Note what this does *not* change: the pipeline above is
-`WebArchive -> canonical MHTML -> one common viewer`, which is the same
+Note what this does *not* change: the pipeline is
+`WebArchive -> canonical MHTML -> one common viewer`, the same
 canonical-format rule the rest of the project follows. It is not a
 cross-format `Archive`/`ArchiveView` IR, and adding one is not on the
-table (see "No format-neutral `Archive`/`ArchiveView` IR" above).
+table (see "No format-neutral `Archive`/`ArchiveView` IR" above). A
+`.webarchive` that turns out to contain MHTML is handled by the same path,
+because format detection runs on the bytes and only the parse step
+differs.
 
-### Security constraints the viewer must satisfy
+### Where the viewer lives, and why the expensive half is in the library
 
-The browser will provide no format-specific protection for a
-reconstructed document, so whatever isolation the viewer has, it has to
-impose itself. Two measured facts set the stakes:
+```text
+packages/archivebridge/src/view/     browser-neutral
+  resources.ts    reference -> archive part, or nothing (never the network)
+  css-rewrite.ts  url() and @import inside a stylesheet
+  html-sites.ts   parse5 offsets for every attribute and <style> body
+  render.ts       the policy: what each reference becomes, and the frame graph
 
-- Chrome's *native* MHTML rendering is strikingly inert: a deliberately
-  hostile archive rendered from `file://` ran no scripts and made **zero**
-  external requests, while a plain-HTML twin of the same content in the
-  same directory ran its scripts and fired all five of its beacons. A
-  naive extension viewer would be *less* safe than what Chrome already
-  does for `.mhtml`, which is a good reason not to pre-empt Chrome's
-  renderer for that format.
-- Safari's *native* WebArchive rendering is the opposite: the same
-  hostile archive executed its scripts and reached the network. So
-  real-world `.webarchive` files must be expected to contain live script
-  and external references, because the format's own native renderer runs
-  them.
+apps/extension/src/core/             browser-neutral
+  viewer-source.ts  what the viewer was asked to open, and refusals
+  viewer-policy.ts  the sandbox attribute and the CSP, with their reasons
 
-The constraints, then:
+apps/extension/src/chrome/           Chrome-specific
+  file-interception.ts  declarativeNetRequest: file:// -> viewer
+  local-archive.ts      reading the bytes, and the file-access diagnosis
 
-- **Foreign archive markup never executes in the extension's origin.**
-  Reconstructed content is rendered in a sandboxed iframe, never
-  inserted into an extension page's own DOM.
-- **No archived scripts execute at all.**
-- **No external network fallback.** A reference that cannot be satisfied
-  from inside the archive fails; it never falls through to the network.
-- **Archive-internal resources only** — every resolved reference maps to
-  a part of the archive being viewed.
-- **A strong iframe sandbox** and a **restrictive CSP** (`default-src
-  'none'`-shaped, widened only for viewer-controlled resource URLs).
-- **Recursive frame handling**, at the same bounded nesting depth the
-  parser already enforces (`MAX_FRAME_DEPTH`).
-- **Legacy Blink `shadowmode` normalization** — rewriting
-  `shadowmode` to `shadowrootmode` is required for shadow content to
-  hydrate at all (see "Format vs. capture semantics"), and it is a
-  *deliberate* widening of what renders, so it belongs to the viewer's
-  policy rather than to the parser.
-- **Links stay non-navigable** unless and until an explicit policy says
-  otherwise. Making archived links live is a product decision with
-  privacy consequences (it can leak that an archive was opened), not a
-  default.
+apps/extension/src/viewer/           Chrome-specific glue
+  viewer.ts             DOM, object URLs, their lifetime, the minimal chrome
+```
 
-The test server in `apps/extension/e2e/test-page.ts` already records
-every request it receives, specifically so "the viewer made no network
-requests" can become an assertion rather than an aspiration.
+`renderMhtml` takes a canonical `MhtmlDocument` and one injected function,
+`createResourceUrl(bytes, mimeType) -> string`. That single seam is the
+only platform-dependent thing in the whole reconstruction: in a browser it
+is `URL.createObjectURL` wrapped in whatever owns the URL's lifetime, and
+in a test it is a deterministic stand-in, which is what makes the entire
+rewrite path assertable byte for byte with no browser at all.
+
+Putting it in the library rather than in the extension keeps both of
+CONTRIBUTING.md's boundary rules intact at once. The library gains no DOM
+or WebExtension dependency (it has none — the seam is a callback). And the
+extension does not reimplement archive parsing or reference resolution,
+nor take a `parse5` dependency of its own to do HTML rewriting — which it
+would otherwise need, since attribute-offset rewriting on untrusted HTML
+is precisely the job `mhtml/html-rewrite.ts` already justifies a real HTML
+parser for. It is also what makes the later Firefox and Safari viewers a
+different *loader* around the same core rather than a second
+implementation: what changes per browser is where the bytes come from,
+how a resource URL is minted, and whether a local-file navigation can be
+intercepted at all.
+
+### Isolation: a blob-backed document in a sandboxed frame
+
+Two decisions here are forced by measured platform behavior rather than
+chosen for taste (all measured on Chromium 153).
+
+**`sandbox="allow-same-origin"`, and no other token.** A sandboxed
+document with an opaque origin *cannot load a `blob:` URL* minted by the
+extension — Chromium refuses with "Not allowed to load local resource".
+Without `allow-same-origin`, every archived image, stylesheet, font and
+nested frame would have to be inlined as a `data:` URL instead: a 33%
+base64 inflation of every byte of a multi-megabyte capture, embedded in
+document text, with no way to release it afterwards and an exponential
+blow-up for a resource referenced from several nesting levels of frame.
+
+What makes that trade sound is the absence of `allow-scripts`. Nothing in
+the archive can execute, so nothing can act on the origin the frame has;
+inline handlers, `javascript:` URLs, `<script>` bodies and `meta refresh`
+are all inert as a result (each measured), on top of being rewritten away.
+The notorious `allow-scripts allow-same-origin` pair — which lets a frame
+remove its own sandbox — therefore cannot arise. Sandbox flags are
+inherited by nested browsing contexts and can only be narrowed, so an
+archived `<iframe sandbox="allow-scripts">` gains nothing either. Also
+absent, deliberately: `allow-forms`, `allow-top-navigation`(`-by-user-
+activation`), `allow-popups`, `allow-modals`, `allow-downloads`,
+`allow-pointer-lock`, `allow-presentation`,
+`allow-popups-to-escape-sandbox`.
+
+**The residual fact, stated plainly:** because the frame is same-origin
+with the extension, a `chrome.runtime` object *exists* in its global.
+There is no code that can ever reach it — that is what "no
+`allow-scripts`" means, and the E2E suite asserts the archive's own script
+elements are present and none of them ran — but the honest description of
+this design is "unreachable", not "absent". Removing it would mean the
+`data:` URL model above, and that trade was judged the wrong one.
+
+**A blob-backed document rather than `srcdoc`.** Both work identically for
+rendering (measured, with `allow-same-origin`). Blob URLs win on the
+recursive case: a nested archived frame is just another URL, so a frame
+tree of any depth is built with no escaping at all, whereas `srcdoc` would
+require embedding each descendant document inside its ancestor's attribute
+value and getting depth-N HTML escaping right — exactly the kind of string
+surgery this codebase avoids. One registry then owns every URL the load
+created, documents and resources alike, which is what makes the lifetime
+model below a single rule instead of two.
+
+### The security contract, as rules
+
+The browser provides no format-specific protection for a reconstructed
+document, so whatever isolation the viewer has, it imposes itself. The
+rewrite is the primary mechanism and the CSP is the backstop — in that
+order, because some escapes are governed by no CSP fetch directive at all
+(`<link rel=preconnect>` and `rel=dns-prefetch` open a connection without
+ever making a request). With one measured exception, stated next, where
+that order is reversed.
+
+**The invariant, stated so that it is true.** *Every statically
+identifiable browser-loadable external reference is neutralized by
+`renderMhtml`. CSP is the mandatory backstop for loads whose URL-bearing
+meaning emerges only from browser runtime semantics — currently, CSS
+custom-property substitution.* That class is rule 1's exception and is
+spelled out there. A stronger claim — that removal by `renderMhtml` alone
+covers every browser-loadable reference, full stop — was measured to be
+false: implementing it would mean evaluating the CSS cascade inside the
+rewriter, which the renderer deliberately does not do.
+
+1. **Every reference a browser would load, and that the archive's text
+   identifies as a reference, is rewritten.** A reference that resolves to
+   an archive part becomes a viewer-owned URL; everything else becomes
+   `about:invalid`, a URL guaranteed never to resolve.
+
+   The exception is exact and worth stating in full, because it is the only
+   place where the CSP is load-bearing rather than redundant. A bare
+   `<string>` inside `image-set()` is a URL (CSS Images 4), and a CSS
+   custom property can carry that string in from anywhere in the cascade:
+   `:root{--x:"https://…"}` plus `#a{background-image:image-set(var(--x)
+   1x)}` loads the URL (measured, Chromium 153 — and likewise through
+   `-webkit-image-set`, `mask-image`, `cursor`, `border-image-source`, an
+   `@property` `initial-value`, a `@layer`, and a `style=` attribute that
+   defines the property on one element for a rule in another sheet to
+   consume). Written *in the same declaration* — `image-set(var(--x,
+   "https://…") 1x)`, and the same through `env()` and `if()` — the string
+   is right there in the text and the scanner neutralizes it. Carried by
+   the cascade, it is not a reference in any stylesheet's text at all:
+   deciding whether `--x` is a URL means resolving custom-property
+   substitution across every sheet, inline style and `@property` initial
+   value that could define it. A static rewriter that approximated this by
+   rewriting every string that *might* be one would corrupt font names,
+   `content` strings and `syntax` descriptors — so the renderer does not
+   pretend, and `img-src blob: data:` refuses the load instead. The E2E
+   suite asserts both halves against a fixture built for it: the URL is
+   still visible in the rendered stylesheet, Chromium really computed it
+   into an image URL, every one of them produced a named `img-src`
+   violation, and the beacon server recorded zero requests and zero
+   connections.
+2. **No external network fallback.** A reference the archive cannot
+   satisfy is a warning in the viewer's notes list, never a fetch.
+3. **Archive-internal resources only**, identified by the archive's own
+   recorded URLs (`Content-Location`) and `Content-ID`s. There is
+   deliberately no filename or suffix matching fallback: guessing which
+   part an unmatched reference "meant" would make the resource graph
+   depend on heuristics rather than on what was captured.
+4. **Script references are never resolved, even when the archive contains
+   the bytes.** `<script src>` and SVG `<script href>` are neutralized
+   outright, so an archived script is not merely blocked from running —
+   it is never loaded.
+5. **Inline event handlers are renamed out of the handler namespace**
+   (`onerror` becomes `data-archivebridge-onerror`), and `javascript:`,
+   `file:`, `ws:` and extension-origin schemes are rejected before lookup.
+   Archived script cannot run even in a context where scripting was
+   somehow enabled.
+6. **Plugin content and network hints are neutralized**: `<object data>`,
+   `<embed src>`, and every `<link rel>` that is a hint rather than a
+   resource (`preload`, `prefetch`, `modulepreload`, `preconnect`,
+   `dns-prefetch`, `manifest`).
+7. **Links stay non-navigable.** An `<a href>` that leaves the document
+   becomes `href="#"` with the original preserved in
+   `data-archivebridge-href`; an in-page anchor is left exactly alone.
+   Making archived links live is a product decision with privacy
+   consequences (it can leak that an archive was opened), not a default.
+   Form actions, `ping`, `cite` and `longdesc` are neutralized outright.
+8. **`<base href>`, `<meta http-equiv=refresh>` and an archived
+   `Content-Security-Policy` meta do not survive.** The base URL is an
+   *input* to resolution and would only send unrewritten references off
+   the archive; a refresh is a navigation to a URL that no longer exists;
+   an archived CSP names origins that no longer exist and can only stop
+   the viewer's own resource URLs from loading, never make anything safer.
+9. **Foreign markup never enters the extension page's DOM.** The viewer
+   receives a URL and assigns it to an iframe. It never parses archived
+   HTML into, or reads it out of, its own document.
+10. **Recursion stays bounded** by the parser's existing `MAX_FRAME_DEPTH`
+    and the existing `frame-depth-exceeded`/`cyclic-frame-reference`
+    diagnostics — and, for stylesheets, by `MAX_STYLESHEET_IMPORT_DEPTH`.
+    The two are separate constants on purpose: frame depth is a property of
+    the archive formats and is read by the parser and converter, while an
+    `@import` chain exists only inside stylesheet text and is reached only
+    by the viewer. Memoization already cuts a *cycle* and makes a diamond
+    graph linear, but an acyclic chain through thousands of distinct CSS
+    parts recurses once per link and overflowed the stack at roughly 2000
+    (measured) — cheap to put in a hostile archive of a few hundred KB.
+11. **Nothing can put a reference back after the rewrite.** SVG's
+    declarative animation elements (`<set>`, `<animate>`, …) need no
+    scripting, so a sandbox without `allow-scripts` does not stop them, and
+    they can assign a fresh URL to an attribute the rewrite already
+    neutralized. Measured in Chromium 153 inside
+    `sandbox="allow-same-origin"`: `<set attributeName="href" to="https://…">`
+    on an `<image>`, the same via `<animate values=… fill="freeze">`, the
+    same targeting another element by `href="#id"`, the same on
+    `<feImage>`, and the same timed off a click (`begin="target.click"`) all
+    restored the URL and fetched it. Their operative attributes
+    (`attributeName`, `to`, `from`, `by`, `values`) are therefore renamed
+    away: animation fidelity is worth less to an archive reader than the
+    guarantee that a rendered archive cannot acquire a live reference after
+    the fact. Making the mechanism inert is enough, so there is no SVG
+    sanitizer.
+13. **A reference whose target the browser would parse as more content is
+    refused, not resolved.** Three constructs look like resources and are
+    really documents:
+
+    - **SVG `<use>` naming another document.** Chromium does not read bytes
+      from the target — it parses it as an SVG document and clones the
+      referenced subtree into *this* document, where the target's own
+      references load. Measured in Chromium 153: an `<image href="https://…">`
+      inside the referenced `<symbol>`, a `fill="url(https://…)"` beside it,
+      and a further `<use href="https://…">` one level deeper all fetched;
+      inside the viewer the same construct reached for the network from an
+      archived SVG's bytes, and only the CSP stopped it. Every *other*
+      external SVG reference was measured not to instantiate anything —
+      `<image>`, a CSS `background-image`, `fill`/`stroke` naming a pattern
+      or gradient, `filter`, `mask`, `clip-path`, `marker-*`, `<feImage>`,
+      `<textPath>`, `<mpath>`, `<tref>`, and `<pattern href>`/`<linearGradient
+      href>`/`<filter href>` template inheritance all fetched the file and
+      loaded nothing from inside it. So the exposure is `<use>` alone, and a
+      one-element refusal closes it; a `<use href="#id">` naming this
+      document keeps working, because the markup it clones has already been
+      rewritten. The alternative — recursively rewriting SVG parts and
+      minting sanitized copies — would buy back an archived sprite sheet's
+      icons, and costs parsing XML with an HTML parser, where a hostile
+      `<b>` forces foreign-content breakout and can hide an attribute from
+      the rewrite that Chromium's XML parser still loads. That trade is
+      available later and is not one to make while closing a hole.
+    - **A `data:` stylesheet**, as `<link rel=stylesheet href="data:text/css,…">`
+      or `@import "data:text/css,…"`. The bytes travel with the URL; the
+      references *inside* them do not. Measured: such a sheet loads its own
+      `@import` and `url()` to any origin, and nests a further `data:` sheet
+      inside itself.
+    - **A `data:` frame** (`<iframe src="data:text/html,…">`), which is a
+      document whose markup the rewrite never saw: measured to load its
+      images, run its script and nest another `data:` frame.
+
+    A `data:` *image*, font or media reference is kept exactly as written,
+    because it genuinely cannot reach anything — a `data:image/svg+xml` in
+    an `<img>` or a CSS `url()` is in the image-loading path's secure static
+    mode and loaded no external reference of its own (measured). Refusing
+    the three above costs no fidelity that the viewer had: under
+    `style-src`/`frame-src` neither a `data:` stylesheet nor a `data:` frame
+    rendered at all, so this moves them from "silently blocked by the
+    backstop" to "refused by the rewrite, with a warning".
+14. **CSS values in attribute form are rewritten too.** Not just `style=`:
+    SVG's presentation attributes are CSS declarations, and measured in
+    Chromium 153 exactly `fill`, `stroke`, `filter`, `mask`, `clip-path`,
+    `marker-start`, `marker-mid` and `marker-end` fetch a `url()` written as
+    an attribute — with no stylesheet, no `style=` and no script anywhere.
+    They go through the same CSS scanner as a `style=` attribute, so
+    `fill="url(#gradient) red"` keeps both its same-document reference and
+    its fallback paint. (`mask-image`, `cursor`, `color`, `stop-color`,
+    `background-image` and the `marker` shorthand fetched nothing in that
+    position and are deliberately absent, like the measured `background`
+    list above.)
+12. **A rewrite that cannot be applied fails the document closed.** HTML
+    tree construction merges the attributes of a *second* `<html>`/`<body>`
+    start tag onto the element the first one created, and `parse5` records
+    no source location for a merged attribute — so
+    `…<body><p>x</p><body background="https://…">` leaves a live external
+    reference with no span to splice (measured: `parse5` reports it
+    unlocatable, and Chromium loads it). Warning and shipping the document
+    would leave exactly the URL the rewrite exists to remove, so the
+    document is refused instead and the reader is told why. The trigger is
+    narrow by construction — it fires only when the renderer *wanted* to
+    change a site, not on malformed markup in general.
+
+The CSP behind all that (`core/viewer-policy.ts`, and the manifest's
+`content_security_policy.extension_pages`, which a `blob:` document
+inherits from the extension page that created it — measured):
+
+```text
+default-src 'none'; script-src 'self'; style-src 'unsafe-inline';
+img-src blob: data:; font-src blob: data:; media-src blob: data:;
+frame-src blob:; object-src 'none'; connect-src file:;
+form-action 'none'; base-uri 'none'
+```
+
+**Why there is one CSP and not two.** A second, stricter policy injected
+into each archive document — `script-src 'none'` and friends in a
+`<meta http-equiv>` — was measured and adds nothing. With the frame
+sandboxed and `allow-scripts` absent, Chromium refuses script at the
+browsing-context level ("Blocked script execution … because the document's
+frame is sandboxed and the 'allow-scripts' permission is not set"), which
+is strictly stronger than any `script-src` value; an injected
+`script-src 'none'` produced an identical result, including for a
+`<script src="chrome-extension://…/viewer.js">` that the inherited
+`script-src 'self'` would otherwise admit — so that residual is confirmed
+unreachable rather than merely assumed to be. An injected
+`default-src 'none'`, meanwhile, *broke* the archive's own presentation
+(inline styles refused). And injecting any meta CSP would need the renderer
+to **insert** markup rather than splice located spans — a new capability
+with no reliable insertion point in a malformed document — plus a second
+copy of policy intent that can drift from `core/viewer-policy.ts`. So the
+model stays: one extension-wide CSP, inherited.
+
+`style-src 'unsafe-inline'` is the one concession, and it is unavoidable:
+an archived page's `<style>` blocks and `style=` attributes are the
+substance of how it looks, and content that arrives at runtime cannot be
+hashed or nonced. Note what is *not* there: no `'self'` in any resource
+directive, so archived markup cannot even name the extension's own files;
+no network scheme anywhere; `frame-src blob:` covers a frame navigating
+*itself*, which is the one navigation the sandbox flags do not; and
+`base-uri 'none'` blocks an archived `<base>` a second time, after the
+rewrite already removed it.
+
+Two measured facts set the stakes for all of this. Chrome's *native* MHTML
+rendering is strikingly inert — a deliberately hostile archive rendered
+from `file://` ran no scripts and made zero external requests, while a
+plain-HTML twin in the same directory ran its scripts and fired all five
+of its beacons. Safari's *native* WebArchive rendering is the opposite: the
+same hostile archive executed its scripts and reached the network. So a
+naive extension viewer would be *less* safe than what Chrome already does
+for `.mhtml` (a good reason not to pre-empt it), and real-world
+`.webarchive` files must be expected to contain live script and external
+references, because the format's own native renderer runs them.
+
+### Resource resolution and CSS
+
+Resolution is deliberately small. A reference value plus the base URL of
+the document or stylesheet it appeared in resolves, in order, to: a
+same-document fragment (left alone), a `cid:` reference (through the
+Content-ID index — how canonical MHTML links frames and how Chromium names
+inline content), a `data:` URL (kept verbatim at a site that loads *bytes*
+— an image, a font, a media file — and refused at one that parses a
+*document*: a stylesheet, an `@import`, a frame; see rule 13 above), an
+archived part by URL, or nothing. HTML sites are
+found with `parse5` source offsets, the same technique and the same
+reasoning as `mhtml/html-rewrite.ts`, so only located spans are spliced and
+every other byte survives. Two parsing choices there are load-bearing:
+`scriptingEnabled: false`, because the rendered document has scripting
+disabled and the browser will therefore parse `<noscript>` content as live
+markup that must be rewritten; and descending into declarative shadow roots
+(both spellings) but not into ordinary inert `<template>` content, which no
+script will ever activate.
+
+**A resolved archive-part reference keeps no fragment.** The minted URL
+names a whole part, so `fill="url(paint.svg#gradient)"` or
+`<linearGradient href="filters.svg#f">` resolve and render, but as the
+referenced part's default view rather than the named element — the same
+loss already noted for `<use href="sprite.svg#icon">` in rule 13 above,
+generalized to every cross-part reference that carries a fragment. The fix
+belongs with recursive/safe SVG resource reconstruction, not a URL-
+concatenation change, for the same XML-vs-HTML-parser reasoning as the
+`<use>` refusal, and is not made here.
+
+**CSS gets a bounded scanner, not a parser.** `view/css-rewrite.ts` is a
+three-state scanner — comments, strings, url tokens — over CSS Syntax
+Level 3's tokenizer rules, handling quoted and unquoted `url()` values,
+CSS escapes, `@import` in both string and `url()` form, and unterminated
+tokens (which degrade to no rewrite rather than to a corrupt one).
+
+**Keyword matching is not enough, and that is the one place this was
+originally wrong.** CSS identifiers and at-keywords may be spelled with
+escapes, and every keyword comparison in the spec is made against the
+token's *decoded value* (§4.3.4 checks a consumed ident sequence against
+`url`; an at-rule's name is the at-keyword token's value). Measured in
+Chromium 153, all of `u\72l(…)`, `\75rl(…)`, `\75 rl(…)`,
+`\75\72\6c(…)`, `\55RL(…)`, `@\69mport "…"` and
+`@\49\4d\50\4f\52\54 "…"` load — and a scanner comparing raw source
+bytes sees none of them. The scanner therefore consumes a whole ident
+sequence, decoding escapes with the same `readEscape` the url-token reader
+uses, and compares the decoded value; reading the whole identifier is also
+what makes a tail match (`myurl(`, `my\75rl(`) impossible without a
+lookbehind. Two related measurements shaped the same code: a bare
+`<string>` argument of `image-set()`/`-webkit-image-set()` is a URL that
+loads with no `url()` around it, so a string is treated as a reference when
+the innermost enclosing frame is one of those functions; and `url (x)` and
+`url/**/(x)` fetch *nothing*, because a function token needs its `(`
+immediately — so the scanner no longer rewrites them either, which it used
+to.
+
+**Substitution functions are transparent, the cascade is not.** A string
+written inside `var()`, `env()` or `if()` ends up wherever that function
+sits, so `image-set(var(--x, "u.png") 1x)` loads `u.png` (measured,
+Chromium 153, as do the `env()` and `if()` spellings). The scanner
+therefore looks past those three frames when deciding whether a string is a
+URL — one small rule, and no evaluation: the string is right there in the
+text. Everything else keeps its own frame, which is what leaves
+`image-set(url(x.png) type("image/png"))`, `font-family: var(--f, "Some
+Font")` and an `if()` condition's `style(--c: "…")` alone. The *other*
+direction — a string that only becomes a URL once the cascade substitutes
+it — is out of reach by construction and is rule 1's documented exception,
+where the CSP is the mandatory mechanism. A real
+CSS parser (`postcss`, `css-tree`, `lightningcss`) would be a new runtime
+dependency an order of magnitude larger than the problem. That is the
+opposite conclusion from HTML, and the difference is not arbitrary: HTML
+tokenization has tree-construction feedback (RAWTEXT, foster parenting,
+`<template>` content, namespace adjustment) where "which text is markup"
+genuinely depends on the parse, while a `url(` inside a CSS comment or
+string is unreachable from three flat scanner states. Replacement values
+are always written as a double-quoted url token with `\`, `"`, newlines
+**and `<`/`>`** escaped, so an archive-controlled value can close neither
+the token nor — via `</style>` — the enclosing element.
+
+### Frames
+
+Frame relationships are the ones ArchiveBridge already reconstructs:
+`convertWebArchiveToMhtml` rewrites each parent's `<iframe src>` to
+`cid:<child-content-id>`, and the viewer resolves exactly that link. No
+second frame model is introduced.
+
+Each archived HTML part is reconstructed **at most once** and memoized by
+part index, which bounds the total work at the number of HTML parts and
+makes a diamond frame graph linear rather than exponential. A frame
+reached while it is already being reconstructed higher up its own chain is
+cut with `cyclic-frame-reference`; a chain longer than `MAX_FRAME_DEPTH`
+is cut with `frame-depth-exceeded`; either way the frame's `src` becomes
+`about:invalid` and the reader gets a note. An `<iframe srcdoc>` is
+rewritten recursively in place, because its content is live markup whose
+references would otherwise ship exactly as captured.
+
+### Shadow DOM normalization
+
+Blink writes an attached shadow root as `<template shadowmode="open">` (or
+`"closed"`), with `shadowdelegatesfocus` for a delegating root — the
+legacy pre-standard spelling, which no browser hydrates (all measured
+against a real `chrome.pageCapture` result). The viewer rewrites
+`shadowmode` to `shadowrootmode` and `shadowdelegatesfocus` to
+`shadowrootdelegatesfocus`, and only there: the rewrite is driven by HTML
+structure (a `<template>` element located by the parser), never by text
+matching on the attribute name, and it does not touch a template that
+already declares the standard attribute. A mode is never invented — a
+captured closed root stays closed, and a `shadowmode` value that is
+neither `open` nor `closed` is left alone. This is a *deliberate widening*
+of what renders, which is why it belongs to the viewer's policy rather
+than to the parser.
+
+### Viewer resource lifetime
+
+Every URL minted for one archive load belongs to one registry, and a
+registry is released as a unit. There is no global map of archive bytes
+and nothing that outlives the tab.
+
+- **Replacing the archive releases the previous one's URLs.** Opening
+  another archive in an open viewer tab changes only the fragment, so the
+  document is *not* torn down and the viewer must do this itself — it is
+  also why the viewer listens for `hashchange` at all, without which the
+  tab would keep showing the first archive.
+- **The new document is in place before the old URLs go.** There is no
+  moment in which the tab shows a document whose resources have already
+  been revoked.
+- **A failed load releases only what it created.** The render runs into a
+  fresh registry; if it throws or produces no document, that registry is
+  released and the archive already on screen is left alone.
+- **`pagehide` releases the current registry.** Belt and braces — a
+  document's object URLs die with the document — but it makes the
+  ownership explicit rather than implicit. It deliberately does *not*
+  consult `PageTransitionEvent.persisted`, because a viewer page is never
+  back/forward-cached: asked directly via CDP
+  `Page.backForwardCacheNotUsed`, Chromium 153 gives two structural
+  reasons why `chrome-extension://viewer.html` is ineligible —
+  `SchemeNotHTTPOrHTTPS` and `EmbedderExtensionFrame` — and the same for
+  the archive's `blob:` child frame. Measured end to end: opening an
+  archive, navigating away and pressing Back yields a *fresh* viewer
+  document that re-reads the file and re-renders correctly. So `pagehide`
+  here only ever means real teardown, and a `persisted === true` branch
+  would guard a state the platform will not create.
+
+### Chrome: intercepting a local `.webarchive`
+
+Chrome will not render a `.webarchive`: the navigation never commits,
+`downloads.onCreated` fires with `mime=application/x-webarchive`, and the
+tab is destroyed. The one hook that runs *before* that download decision
+is `declarativeNetRequest`, which — unlike `webRequest` on Firefox — does
+see `file://` main-frame navigations and can redirect them. That single
+fact is what makes the viewer reachable from a double-click with no native
+companion.
+
+The rule redirects `^file:///.*\.webarchive$` (case-insensitive,
+`main_frame` only) to `viewer.html#<the original URL>`. Four details are
+measured rather than assumed:
+
+- **It has to be a dynamic rule.** `regexSubstitution` must name the
+  viewer with an absolute URL, and an unpacked extension's own origin is
+  not knowable until it is installed, so the substitution is built from
+  `chrome.runtime.getURL()` at startup. A static `rule_resources` entry
+  with a relative substitution is accepted and then never matches.
+- **`host_permissions: ["file:///*"]` is required.** A `redirect` action
+  needs host permission for the request URL; without it the rule installs,
+  reports no error, and the navigation downloads as before. The same
+  permission is what lets the viewer `fetch()` the bytes.
+- **The source travels in the fragment, not a query parameter.** Chromium
+  percent-encodes `#`, `?`, `%` and space in a `file:` URL but leaves `&`,
+  `=` and `+` literal, so `?src=file:///a&b.webarchive` would silently
+  truncate. A fragment has no sub-delimiters.
+- **`main_frame` only, and no redirect loop.** A `.webarchive` framed or
+  referenced by a page is left alone — turning that into a viewer would
+  let a web page host archived content inside itself. The redirect target
+  is a `chrome-extension://` URL, which cannot match `^file:///`, and the
+  viewer reads the archive with `fetch` rather than a navigation.
+
+The viewer does not trust what the redirect hands it. `core/viewer-source.ts`
+requires the fragment to parse as a URL, to be `file:` with no host, and to
+name a `.webarchive`; anything else is refused by name rather than
+repaired.
+
+The viewer page is **not** a web-accessible resource, and the reason is
+more specific than "extensions should not expose pages". Chrome documents
+that a DNR rule cannot redirect *a public resource request* to a
+non-accessible resource, and that *a navigation from a web origin* to an
+extension resource is blocked unless it is listed; the navigation this rule
+redirects is neither. Chromium's navigation throttle
+(`extensions/browser/extension_navigation_throttle.cc`) returns `PROCEED`
+before any accessibility check when a navigation has no initiator origin —
+the documented case for "a user directly triggers navigation (e.g. using
+the omnibox, or the bookmark bar)", which is exactly a double-click on a
+`.webarchive`. So this is documented behavior, not a loophole.
+
+Measured against Chromium 153, unpacked: a browser-initiated
+`file:///….webarchive` navigation reaches the viewer and renders; a web
+page can neither navigate to `viewer.html`, nor frame it, nor navigate to
+a `file://` archive. The known limit is that a *click on a link in another
+local file* carries a `file://` initiator origin, so it is not
+browser-initiated and Chrome refuses it with an error page. Declaring
+`web_accessible_resources: [{ resources: ["viewer.html"], matches:
+["file:///*"] }]` was measured to fix precisely that case while leaving all
+three web-origin attempts refused — so the usual worry that any
+web-accessible declaration lets arbitrary pages frame the viewer is not
+true for an origin-scoped `matches` list. It is left undeclared anyway,
+because the double-click flow does not need it and not declaring it is the
+smaller surface. Whether a packed/store install behaves identically was not
+verified: the throttle path does not consult install location, but
+`--load-extension` cannot test a CRX install.
+
+`redirect.extensionPath` would avoid needing the runtime extension ID and
+cannot do this job: substitution is a `regexSubstitution` feature only, so
+an `extensionPath` of `/viewer.html#\0` is accepted and lands with the
+`\0` **literal** (measured). A static ruleset is therefore not an option
+while the archive's location travels in the URL.
+
+**The user must enable file URL access, and the extension says so.**
+Chrome's per-extension "Allow access to file URLs" toggle defaults to off,
+and without it neither the redirect nor the read can happen. When it is
+off, the popup shows one line naming the toggle, and a viewer that cannot
+read its archive distinguishes "not allowed to read local files" from
+"could not read this one" via `chrome.extension.isAllowedFileSchemeAccess()`.
+There is no settings screen: nothing in the extension can change that
+toggle, because only the user can.
+
+### Viewer UI
+
+One thin bar naming the archive and summarizing what was reconstructed, a
+collapsible notes list that appears only when there is something to say,
+and the archive filling the rest of the tab. On failure, a title and a
+sentence in place of the frame — plus, for the file-access case only, the
+one Chrome-specific instruction that fixes it. There is no archive
+library, no history, no conversion button, no settings and no inspector:
+conversion is the CLI's job, and the successful state should feel close to
+simply opening a saved page.
 
 ### Per-browser viewer reach, for later
 
-- **Chrome/Edge:** fully reachable with the extension alone. Raw bytes of
-  a local archive are readable via `fetch()` on the `file://` URL once
-  the user enables the per-extension "Allow access to file URLs" toggle
-  (which defaults to off), and `declarativeNetRequest` can redirect a
-  `file://` main-frame navigation to a viewer page, carrying the original
-  URL along. `chrome.pageCapture` cannot re-capture an already-rendered
-  `file://` MHTML tab, so the viewer must work from bytes, not from the
-  rendered DOM.
-- **Firefox:** viewing is possible, automatic interception is not.
-  Neither `webRequest` nor `declarativeNetRequest` sees `file://`
-  navigations, so a double-click cannot be turned into an ArchiveBridge
-  viewer; the realistic flow is an extra click from the plain-text page a
-  content script *can* run on.
+- **Chrome/Edge:** done, as described above.
+- **Firefox:** viewing is possible, automatic interception is not. Neither
+  `webRequest` nor `declarativeNetRequest` sees `file://` navigations, so
+  a double-click cannot be turned into an ArchiveBridge viewer; the
+  realistic flow is an extra click from the plain-text page a content
+  script *can* run on. Everything downstream of "here are the bytes" —
+  `renderMhtml`, the resource graph, the rewrite, the sandbox and CSP
+  constants — is reused unchanged.
 - **Safari:** not reachable from the extension at all — `file://` is
   unsupported for Safari Web Extensions, so reading local archives needs
-  the containing app and native messaging.
+  the containing app and native messaging. Safari also renders
+  `.webarchive` natively, so its gap is `.mhtml`, and the same
+  reconstruction serves it (canonical MHTML is what `renderMhtml` already
+  consumes).
 
 ## TypeScript configuration
 
@@ -1522,10 +2043,18 @@ order of scope:
    duplicate identities, bad charsets, malformed/foreign metadata
    sidecar parts, `cid:` references with no matching part.
 6. **Browser extension E2E** — a real Chromium with the real built
-   extension loaded, capturing a deterministic local page and saving it in
-   both formats, with the resulting bytes verified by
-   `@xarsh/archivebridge` itself. Chrome/Chromium only today; see "Browser
-   automation" below.
+   extension loaded. Two lanes: **save**, which captures a deterministic
+   local page, saves it in both formats and verifies the written bytes
+   with `@xarsh/archivebridge` itself; and **view**, which writes a real
+   `.webarchive` to disk, navigates the browser to its `file://` URL, and
+   asserts against the archived DOM Chrome actually laid out after the
+   extension's own `declarativeNetRequest` rule redirected it. The view
+   lane's security half runs against **hand-built** hostile archives,
+   because Blink's capture strips `<script>` (see "Format vs. capture
+   semantics") while WebKit's does not — so a hand-built one is both the
+   only way to test the threat and the more realistic shape of a real
+   `.webarchive`. Chrome/Chromium only today; see "Browser automation"
+   below.
 7. **Real-world compatibility corpus** *(planned)* — periodic snapshots of
    real sites, run as an opt-in smoke test, never a required CI gate (no
    external network access in normal CI).
@@ -1583,16 +2112,20 @@ Two properties of the suite are deliberate:
 
 ### Browser automation: where this is going
 
-Chrome v0.1's suite is the first lane of an eventual **browser conformance
+Chrome's suite is the first lane of an eventual **browser conformance
 suite**: a live deterministic page -> browser capture -> MHTML ->
-WebArchive conversion -> parse/inspect assertions -> open/view assertions
-in a *different* browser. Assertions stay semantic (part lists, frame
+WebArchive conversion -> parse/inspect assertions -> open/view assertions.
+The whole of that chain except the last hop already runs in one browser
+(capture in Chrome, convert with the library, view in Chrome); what is
+still missing is running the view step in a *different* browser from the
+capture step. Assertions stay semantic (part lists, frame
 nesting, resource bytes); screenshots may supplement them but never
 replace them, because a pixel diff cannot tell a rendering change from a
 fidelity regression.
 
-- **Chrome/Chromium** — done: fully automated extension loading and MV3
-  service-worker testing, headless.
+- **Chrome/Chromium** — done: fully automated extension loading, MV3
+  service-worker testing, and local-file navigation into the archive
+  viewer, headless.
 - **Firefox** *(planned)* — temporary extension installation via
   `web-ext`, then browser automation against the running Firefox. The
   interesting tests there are of the custom capture implementation, since
@@ -1603,6 +2136,22 @@ fidelity regression.
   and a signed Safari Web Extension, so it gets its own macOS lane.
   Safari automation is explicitly **not** a blocker for Chrome work.
 
-The test server already records every request it serves, which is what
-turns the viewer's "no external network fallback" rule (see "Archive
-viewer") into an assertion rather than an aspiration.
+The test server records every request it serves **and every TCP connection
+opened to it**, which is what turns the viewer's "no external network
+fallback" rule (see "Archive viewer") into an assertion rather than an
+aspiration. Both counters are needed: requests cover `<img>`, `fetch`, a
+stylesheet and a frame, but `preconnect`/`dns-prefetch` connect without
+ever sending a request, and no CSP fetch directive governs them — a viewer
+that counted only requests could call itself silent while talking to a
+server.
+
+One capability of the harness is worth recording because it looks like a
+contradiction: the view lane reads the archived DOM out of a frame that
+has no `allow-scripts`. That works because Playwright evaluates in an
+**isolated world** over the automation protocol, which a sandboxed frame
+still has, while the page's own scripting stays off — which is exactly
+what those tests assert. One thing is *not* reachable: Chrome's
+per-extension "Allow access to file URLs" toggle is granted
+unconditionally by `--load-extension` and re-granted on every launch (a
+patched profile preference does not survive), so the denied branch of the
+viewer's failure UX is covered by unit tests rather than by the browser.
