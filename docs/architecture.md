@@ -28,14 +28,14 @@ the **local WebArchive viewer** (opening a `file:///….webarchive` renders
 it in a sandboxed frame from archived bytes alone).
 
 **Planned.** The extension's **Firefox and Safari** capture/save adapters
-and their viewers, and a `validate` command.
+and their viewers.
 
-Sections below discussing `validate` or non-Chromium browsers are
-specifying where that functionality will fit and what invariants it must
-respect, not describing code that exists. They are marked where the
-distinction could otherwise be missed. The commitment that Chrome, Edge,
-Firefox, and Safari are all first-class targets is an architectural
-constraint that holds now and binds the implementation whenever it lands.
+Sections below discussing non-Chromium browsers are specifying where that
+functionality will fit and what invariants it must respect, not
+describing code that exists. They are marked where the distinction could
+otherwise be missed. The commitment that Chrome, Edge, Firefox, and Safari
+are all first-class targets is an architectural constraint that holds now
+and binds the implementation whenever it lands.
 
 ## Goals
 
@@ -65,7 +65,6 @@ MHTML --inspect
 MHTML --convert--> WebArchive
 WebArchive --convert--> MHTML
 MHTML --save                     (browser extension: Chrome/Edge)
-MHTML --validate                                             (planned)
 MHTML --view                                                 (planned)
 ```
 
@@ -161,14 +160,13 @@ WebArchive-native one. The distinction that matters is:
 > A **format-native parsed representation** is fine, even necessary. An
 > **ArchiveBridge-invented cross-format canonical representation** is not.
 
-`inspect` operates on canonical MHTML — always — and `validate` will do the
-same when it lands. There is no separate WebArchive-native
-inspection/validation path; a WebArchive input converts to canonical MHTML
-first, and one implementation handles it from there on:
+`inspect` operates on canonical MHTML — always. There is no separate
+WebArchive-native inspection path; a WebArchive input converts to
+canonical MHTML first, and one implementation handles it from there on:
 
 ```text
 MHTML
-  └─ parse → inspect / validate
+  └─ parse → inspect
 
 WebArchive
   └─ parse
@@ -177,15 +175,14 @@ WebArchive
       ↓
     canonical MHTML
       ↓
-    inspect / validate
+    inspect
 ```
 
 `parseWebArchive` producing a `WebArchiveDocument` is necessary — it's the
 required first step before conversion can run at all — but that parsed
 representation is an intermediate value on the way to canonical MHTML, not
-a second, parallel target that `inspect`/`validate` also operate on
-directly. This is what keeps format-specific inspection logic from
-existing twice.
+a second, parallel target that `inspect` also operates on directly. This
+is what keeps format-specific inspection logic from existing twice.
 
 ### MHTML-native representation
 
@@ -855,9 +852,6 @@ every operation that walks a document's resources, not just in prose:
   exposes every sidecar-shaped part index (valid, malformed, or duplicate)
   precisely so `mhtml/frames.ts` can exclude all of them from ordinary
   resource/frame grouping.
-- `validate` (planned) — the sidecar is itself a validation target (does
-  it parse as the expected plist shape, does its `Content-Type` match), as
-  part of validating the document as a whole.
 
 This does not require a new cross-format IR or a larger type hierarchy to
 express. A single small classification check over a part's parsed
@@ -1039,11 +1033,13 @@ pre-1.0 project, and the durable command surface is kept intentionally
 small (read/write, convert, inspect, and — for the browser extension —
 capture), not grown to cover every operation a future user might want.
 
-`validate` is **planned, not implemented**: it appears in this document
-because the rules it must follow (operate on canonical MHTML, treat the
-metadata sidecar as a validation target) are already settled by the
-surrounding design, and because `Command`'s exhaustiveness checking means
-adding it is a compiler-guided exercise rather than an open question.
+`validate` was considered and deliberately dropped from scope: `inspect`
+already parses to canonical MHTML and prints every diagnostic the parse
+produces — including sidecar diagnostics such as
+`malformed-metadata-sidecar` and `duplicate-metadata-sidecar` — as part of
+its normal output. A separate `validate` command would add nothing beyond
+exit-code semantics, and that distinction belongs on `inspect` itself, not
+on a second command that recomputes what `inspect` already has.
 
 `inspect` and `convert` are implemented entirely on top of the library's
 public API: format detection, `parseMhtml`/`parseWebArchive` producing

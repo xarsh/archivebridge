@@ -105,7 +105,6 @@ What the viewer will and will not do, deliberately:
   archive automatically at all (neither `webRequest` nor
   `declarativeNetRequest` sees `file://` navigations), so viewing there
   will take an explicit click rather than a double-click.
-- A `validate` command (not part of the CLI today).
 
 ArchiveBridge deliberately does **not** try to add formats to the
 browser's own Save As dialog (no browser exposes a hook for it) or
