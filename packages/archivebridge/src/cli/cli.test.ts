@@ -109,6 +109,40 @@ test('inspect on a nonexistent file exits with an error code', () => {
 	assert.ok(lines.some((line) => line.includes('could not read')))
 })
 
+// inspect's exit code is what took over validate's job (docs/architecture.md, "CLI"):
+// it must fail whenever the document carries a diagnostic, not just when parsing
+// fails outright, or a broken-but-parseable archive would silently report success.
+test('inspect exits with an error code when the parsed document has diagnostics, even though it parsed', () => {
+	const mhtml = [
+		'MIME-Version: 1.0',
+		'Content-Type: multipart/related; boundary="B"',
+		'',
+		'--B',
+		'Content-Type: text/plain',
+		'Content-Location: https://example.invalid/a.txt',
+		'',
+		'first',
+		'--B',
+		'Content-Type: text/plain',
+		'Content-Location: https://example.invalid/a.txt',
+		'',
+		'second',
+		'--B--',
+		'',
+	].join('\n')
+
+	const path = join(mkdtempSync(join(tmpdir(), 'archivebridge-cli-')), 'duplicate.mhtml')
+	writeFileSync(path, mhtml)
+
+	const { lines, io } = collectIO()
+	const code = main(['inspect', path], io)
+	const output = lines.join('\n')
+
+	assert.equal(code, 1)
+	assert.match(output, /Diagnostics \(1\):/)
+	assert.match(output, /duplicate-content-location: https:\/\/example\.invalid\/a\.txt/)
+})
+
 test('convert with missing arguments prints usage and exits with an error code', () => {
 	const { lines, io } = collectIO()
 	const code = main(['convert', 'a'], io)

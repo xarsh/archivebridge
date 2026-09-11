@@ -40,7 +40,8 @@ Usage:
   archivebridge convert <input> <output>
 
 Commands:
-  inspect   Show the structure and diagnostics of an archive
+  inspect   Show the structure and diagnostics of an archive, exiting
+            non-zero if it could not be parsed or has any diagnostics
   convert   Convert between MHTML and WebArchive
 
 Options:
@@ -164,7 +165,7 @@ function runInspect(args: readonly string[], io: CliIO): number {
 		io.stdout(`  - ${formatDiagnostic(diagnostic)}`)
 	}
 
-	return document === undefined ? 1 : 0
+	return document === undefined || diagnostics.length > 0 ? 1 : 0
 }
 
 /** Loads bytes as canonical MHTML for `inspect`: a WebArchive input is parsed and converted first (docs/architecture.md, "No format-neutral Archive/ArchiveView IR"). Diagnostics are collected into a caller-supplied array, since `inspect` prints them after the structural output rather than streaming them straight to `io.stderr`. */

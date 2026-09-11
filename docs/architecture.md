@@ -1037,9 +1037,10 @@ capture), not grown to cover every operation a future user might want.
 already parses to canonical MHTML and prints every diagnostic the parse
 produces — including sidecar diagnostics such as
 `malformed-metadata-sidecar` and `duplicate-metadata-sidecar` — as part of
-its normal output. A separate `validate` command would add nothing beyond
-exit-code semantics, and that distinction belongs on `inspect` itself, not
-on a second command that recomputes what `inspect` already has.
+its normal output. A separate `validate` command would have added nothing
+beyond exit-code semantics, so that distinction was folded into `inspect`
+itself instead: it exits non-zero whenever the parsed document carries
+any diagnostic, not only when parsing fails outright.
 
 `inspect` and `convert` are implemented entirely on top of the library's
 public API: format detection, `parseMhtml`/`parseWebArchive` producing
@@ -1054,7 +1055,8 @@ argument handling, format dispatch, and human-readable output formatting.
   above). Either way, the CLI walks one `MhtmlDocument` shape: its flat
   part list, deriving and displaying frame relationships from `cid:`
   references. There is no WebArchive-shaped code path in the CLI for
-  `inspect`.
+  `inspect`. Its exit code is 0 only when the document parsed *and* came
+  back with zero diagnostics — this is what took over `validate`'s job.
 - `convert` calls the direct converter for the requested direction (this
   is the one command that legitimately deals with both format-native
   shapes, since converting *is* the boundary between them).
