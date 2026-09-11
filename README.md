@@ -56,6 +56,26 @@ deliberately hostile `.mhtml` rendered from `file://` runs no scripts and
 makes no network requests at all (measured) — so ArchiveBridge does not
 intercept `.mht`/`.mhtml` on Chrome.
 
+## Installation
+
+Chrome and Edge are implemented today; Firefox and Safari are planned (see
+below). There is no Chrome Web Store or Edge Add-ons listing yet — installing
+means loading the unpacked extension in developer mode:
+
+1. Download `archivebridge-chrome-<version>.zip` from the
+   [GitHub Releases](https://github.com/xarsh/archivebridge/releases) page.
+2. Extract it to a directory you'll keep around (Chrome loads it from there,
+   not from the ZIP).
+3. Open `chrome://extensions`.
+4. Enable **Developer mode** (top right).
+5. Click **Load unpacked** and select the extracted directory.
+6. If you want to view local `.webarchive` files, also enable **"Allow
+   access to file URLs"** — see
+   [Viewing local archives](#viewing-local-archives-chromeedge) below.
+
+Chrome does not install a downloaded ZIP directly — it only loads an already
+extracted directory this way.
+
 ## Viewing local archives (Chrome/Edge)
 
 **Chrome requires you to turn on file access for the extension**, and it

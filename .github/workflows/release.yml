@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Separate from ci.yml on purpose: this workflow only ever runs for a version
+# tag and ends by publishing a GitHub Release, which push/PR CI must never do.
+# See CONTRIBUTING.md, "Release process".
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Triggered by a tag push, so this checks out the exact tagged commit.
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+
+      - name: Validate tag matches the canonical project version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match project version $VERSION (expected v$VERSION)"
+            exit 1
+          fi
+
+      # The same pre-PR gate as ci.yml's `check` job — includes check:versions.
+      - run: npm run check
+
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+      - run: npm run package:extension
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release create "$GITHUB_REF_NAME" \
+            "artifacts/archivebridge-chrome-$VERSION.zip" \
+            --title "ArchiveBridge v$VERSION" \
+            --generate-notes

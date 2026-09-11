@@ -1,6 +1,6 @@
 {
 	"name": "archivebridge",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"description": "ArchiveBridge is an interoperability layer for saved web page archive formats (MHTML/MHT, Safari WebArchive).",
 	"scripts": {
 		"build": "npm run build --workspaces --if-present",
@@ -9,8 +9,10 @@
 		"lint": "biome check .",
 		"format": "biome check --write .",
 		"check:filenames": "node scripts/check-filenames.mjs",
-		"check": "npm run build && npm run typecheck && npm run test && npm run lint && npm run check:filenames",
-		"test:e2e": "npm run test:e2e --workspaces --if-present"
+		"check:versions": "node scripts/check-versions.mjs",
+		"check": "npm run build && npm run typecheck && npm run test && npm run lint && npm run check:filenames && npm run check:versions",
+		"test:e2e": "npm run test:e2e --workspaces --if-present",
+		"package:extension": "npm run check:versions && node scripts/package-extension.mjs"
 	},
 	"repository": {
 		"type": "git",
@@ -27,6 +29,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "2.5.12",
 		"@types/node": "^26.5.0",
+		"adm-zip": "^0.6.1",
 		"typescript": "^7.0.2"
 	},
 	"private": true,

@@ -1,6 +1,6 @@
 {
 	"name": "@xarsh/archivebridge",
-	"version": "0.0.1",
+	"version": "0.1.0",
 	"description": "Interoperability layer for saved web page archive formats (MHTML/MHT, Safari WebArchive).",
 	"type": "module",
 	"keywords": [

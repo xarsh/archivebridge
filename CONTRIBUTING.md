@@ -141,6 +141,13 @@ floor never stops being the tested floor.
   of browser-launch, target-discovery and worker-attach code a
   home-grown CDP harness would need us to maintain. See
   docs/architecture.md, "Browser automation".
+- `adm-zip` (devDependency of the repo root only, never of a workspace) packages
+  the built extension into the Chrome ZIP release artifact
+  (`scripts/package-extension.mjs`). It both writes and reads ZIPs, so the
+  same dependency verifies the artifact it just built — no second package is
+  needed just for inspection. Pinned to `^0.6.1`, the release that fixed two
+  high-severity advisories (GHSA-xcpc-8h2w-3j85, GHSA-vwc7-r8mq-g2x9) in
+  earlier `0.x` versions; check `npm audit` before ever lowering this range.
 - devDependencies are otherwise `typescript`, `@types/node`,
   `@biomejs/biome`. Don't add ESLint, Prettier, Vitest/Jest/Mocha,
   tsx/ts-node, or a CLI argument-parser library without discussing it
@@ -185,9 +192,11 @@ for why each is enabled. Within that:
   never be required to run TypeScript source directly.
 - These conventions govern **workspace source** (`packages/*`, `apps/*`).
   Repo-level tooling under `scripts/` is deliberately plain ESM
-  JavaScript (`.mjs`) instead: it is dependency-free bootstrap tooling
-  that must run under a bare `node` with no tsconfig and no build step,
-  and `scripts/` is covered by no workspace tsconfig, so a `.ts` file
+  JavaScript (`.mjs`) instead: it is bootstrap tooling that must run
+  under a bare `node` with no tsconfig and no build step (most of it is
+  also dependency-free; `scripts/package-extension.mjs` is the one
+  exception — see Dependency policy's `adm-zip` entry), and `scripts/`
+  is covered by no workspace tsconfig, so a `.ts` file
   there would be type-*annotated* without ever being type-*checked* —
   the appearance of safety without the substance. Keep `scripts/` in
   JavaScript unless it grows enough to justify its own tsconfig wired
@@ -217,8 +226,11 @@ Run from the repo root:
 - `npm run lint` — Biome check (format, lint, and import-sorting diagnostics; no writes)
 - `npm run format` — Biome check --write (applies formatting, import sorting, and safe lint fixes)
 - `npm run check:filenames` — verifies file/directory naming policy (see File and directory naming)
-- `npm run check` — build + typecheck + test + lint + check:filenames (the pre-PR gate)
+- `npm run check:versions` — verifies the locked-step version contract (see Release process below)
+- `npm run check` — build + typecheck + test + lint + check:filenames + check:versions (the pre-PR gate)
 - `npm run test:e2e` — the extension's browser E2E suite (opt-in, see below)
+- `npm run package:extension` — builds the extension and packages it into
+  `artifacts/archivebridge-chrome-<version>.zip` (see Release process below)
 
 **`build` runs first in `check`, and has to.** `apps/extension` consumes
 `@xarsh/archivebridge` as a published package would — through its
@@ -280,6 +292,31 @@ Four rules for anything added here:
   pipeline". Where a test needs to reach past the extension it uses a real
   Chrome API from a context of its own — an extension page, or the
   browser's `Target` CDP domain — never a hook in `src/`.
+
+## Release process
+
+ArchiveBridge is one product with **one locked-step version**, not
+independently versioned components. These four must always report the same
+version:
+
+- root `package.json`
+- `packages/archivebridge/package.json`
+- `apps/extension/package.json`
+- `apps/extension/manifest.json`
+
+`npm run check:versions` (`scripts/check-versions.mjs`) enforces this and is
+part of `npm run check`, so drift is caught on every push/PR, not only at
+release time. Bump all four together; there is no bump-automation tooling
+(no Changesets/Lerna/release-please) — this is intentionally simple.
+
+The release tag convention is `v<version>` (e.g. `v0.1.0`), matched against
+the root version by `.github/workflows/release.yml`, which also builds
+`npm run package:extension`'s output
+(`artifacts/archivebridge-chrome-<version>.zip`) and attaches it to the
+GitHub Release. `artifacts/` is generated, git-ignored, and safe to delete
+locally. Publishing `@xarsh/archivebridge` to npm is a separate, not-yet-done
+release concern — the Chrome ZIP bundles the local workspace library code,
+so installing the extension never depends on the npm registry version.
 
 ## File and directory naming
 

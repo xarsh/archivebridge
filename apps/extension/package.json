@@ -20,7 +20,7 @@
 		"playwright": "^1.63.0"
 	},
 	"dependencies": {
-		"@xarsh/archivebridge": "^0.0.1",
+		"@xarsh/archivebridge": "^0.1.0",
 		"buffer": "^6.0.3",
 		"string_decoder": "^1.3.0"
 	}
