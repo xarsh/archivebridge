@@ -120,6 +120,24 @@ function serialize<T>(work: () => Promise<T>): Promise<T> {
  */
 let currentWorkerSaveStarted = false
 
+/**
+ * Chrome currently reports this exact, undocumented error message when
+ * pageCapture.saveAsMHTML cannot capture a structurally restricted page
+ * such as chrome:// or the Chrome Web Store.
+ *
+ * There is no structured error code for this case, so this intentionally
+ * uses an exact string match. If Chrome changes the wording, the safe
+ * fallback is that the ordinary error badge is shown again.
+ *
+ * Do not broaden this to fuzzy matching: a false positive could hide a
+ * genuinely unexpected capture failure.
+ */
+const UNCAPTURABLE_PAGE_MESSAGE = "Don't have permissions required to capture this page."
+
+function isUncapturablePageError(error: unknown): boolean {
+	return error instanceof Error && error.message === UNCAPTURABLE_PAGE_MESSAGE
+}
+
 /** Turns anything thrown along the pipeline into one line a human can act on. */
 function describeError(error: unknown): string {
 	if (error instanceof ArchiveConversionError) {
@@ -168,6 +186,7 @@ async function runSaveCommand(format: SaveFormat, tabId: number): Promise<SaveCo
 	currentWorkerSaveStarted = true
 	return await serialize(async () => {
 		let result: SaveCommandResult
+		let uncapturablePage = false
 		try {
 			const captured = await captureMhtml(tabId)
 			const archive = archiveBytesFrom(captured, format)
@@ -179,8 +198,14 @@ async function runSaveCommand(format: SaveFormat, tabId: number): Promise<SaveCo
 		} catch (error) {
 			console.error('ArchiveBridge: save failed', error)
 			result = { ok: false, message: describeError(error) }
+			uncapturablePage = isUncapturablePageError(error)
 		}
-		await showOutcome(result)
+		// The popup still renders `result.message`; only the toolbar-wide badge
+		// is skipped, since a page Chrome will never let any extension capture
+		// is not evidence of a save this extension could have gotten right.
+		if (!uncapturablePage) {
+			await showOutcome(result)
+		}
 		return result
 	})
 }

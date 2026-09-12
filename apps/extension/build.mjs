@@ -24,15 +24,15 @@
 // tsconfig and no build step of its own. See CONTRIBUTING.md, "TypeScript
 // conventions".
 
-import { cp, mkdir, rm } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { cp, mkdir, readFile, rm } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
 const root = dirname(fileURLToPath(import.meta.url))
 const outDir = join(root, 'dist')
 
-const STATIC_FILES = ['manifest.json', 'popup.html', 'offscreen.html', 'viewer.html']
+const STATIC_FILES = ['manifest.json', 'popup.html', 'offscreen.html', 'viewer.html', 'icons']
 
 /** The four extension contexts. Each is its own bundle: they load independently and share no module instance at runtime. */
 const ENTRY_POINTS = {
@@ -74,7 +74,26 @@ const result = await build({
 // what the library does with a non-UTF-8 resource. See
 // docs/architecture.md, "Building the extension".
 
-await Promise.all(STATIC_FILES.map((file) => cp(join(root, file), join(outDir, file))))
+// `icons/` also holds `icon-master-512.png` (the source the four shipped
+// sizes are generated from) and, on macOS, stray Finder metadata — neither
+// belongs in a loadable extension or the ZIP `package:extension` builds from
+// this same `dist/`. Manifest.json's own `icons` map is the one place the
+// shipped set is declared, so it is what filters the copy, rather than a
+// second, driftable list here.
+const manifestIcons = JSON.parse(await readFile(join(root, 'manifest.json'), 'utf8')).icons
+const shippedIconFiles = new Set(Object.values(manifestIcons).map((iconPath) => basename(iconPath)))
+
+await Promise.all(
+	STATIC_FILES.map((file) =>
+		cp(join(root, file), join(outDir, file), {
+			recursive: true,
+			filter: (src) => {
+				const name = basename(src)
+				return name === file || shippedIconFiles.has(name)
+			},
+		}),
+	),
+)
 
 const sizes = Object.entries(result.metafile.outputs)
 	.filter(([file]) => file.endsWith('.js'))

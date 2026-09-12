@@ -45,6 +45,11 @@ function show(message: string, failed: boolean): void {
 	status.classList.toggle('error', failed)
 }
 
+function clearStatus(): void {
+	status.textContent = ''
+	status.classList.remove('error')
+}
+
 function setBusy(busy: boolean): void {
 	for (const [, button] of buttons) {
 		button.disabled = busy
@@ -53,7 +58,7 @@ function setBusy(busy: boolean): void {
 
 async function requestSave(format: SaveFormat): Promise<void> {
 	setBusy(true)
-	show('Capturing…', false)
+	clearStatus()
 	try {
 		const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
 		if (tab?.id === undefined) {
@@ -61,8 +66,9 @@ async function requestSave(format: SaveFormat): Promise<void> {
 			return
 		}
 		const response = (await chrome.runtime.sendMessage({ type: 'save', format, tabId: tab.id })) as { readonly ok?: unknown; readonly message?: unknown }
-		const ok = response.ok === true
-		show(typeof response.message === 'string' ? response.message : ok ? 'Saved.' : 'Save failed.', !ok)
+		if (response.ok !== true) {
+			show(typeof response.message === 'string' ? response.message : 'Save failed.', true)
+		}
 	} catch (error) {
 		show(error instanceof Error ? error.message : String(error), true)
 	} finally {

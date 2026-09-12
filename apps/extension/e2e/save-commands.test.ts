@@ -204,7 +204,26 @@ describe('Chrome extension save commands', () => {
 		await popupPage.evaluate(() => {
 			document.getElementById('save-webarchive')?.click()
 		})
-		await popupPage.waitForFunction(() => (document.getElementById('status')?.textContent ?? '').length > 0)
+
+		// `setBusy` disables both buttons for the duration of the command
+		// (popup.ts), synchronously with the click -- a real, immediate signal
+		// that the command started, and one a successful save never undoes
+		// until it is actually done.
+		assert.equal(await popupPage.evaluate(() => (document.getElementById('save-webarchive') as HTMLButtonElement | null)?.disabled), true)
+
+		// The command re-enables the buttons only in `requestSave`'s `finally`,
+		// which runs after `chrome.runtime.sendMessage` resolves -- i.e. after
+		// the real save (capture, convert, download) has actually finished, one
+		// way or the other. Waiting on this, rather than on `#status`, matches
+		// current behavior: a *successful* save never puts anything in
+		// `#status` (see popup.ts, `requestSave`), so waiting for status text
+		// would hang forever on the success path this test exercises.
+		await popupPage.waitForFunction(() => (document.getElementById('save-webarchive') as HTMLButtonElement | null)?.disabled === false)
+
+		// Success shows no visible status text; the status line is reserved for
+		// errors.
+		assert.equal(await popupPage.evaluate(() => document.getElementById('status')?.textContent), '')
+
 		const observed = await session.serviceWorker.evaluate(() => globalThis.archivebridgeObservedRequests ?? [])
 		assert.deepEqual(observed, [{ type: 'save', format: 'webarchive', tabId: testPageTabId }])
 	})

@@ -4,6 +4,12 @@
 	"version": "0.1.0",
 	"description": "Save the current page as MHTML or Safari WebArchive, and open local .webarchive files that Chrome cannot display itself.",
 	"minimum_chrome_version": "116",
+	"icons": {
+		"16": "icons/icon-16.png",
+		"32": "icons/icon-32.png",
+		"48": "icons/icon-48.png",
+		"128": "icons/icon-128.png"
+	},
 	"permissions": ["pageCapture", "downloads", "offscreen", "contextMenus", "declarativeNetRequest"],
 	"host_permissions": ["file:///*"],
 	"content_security_policy": {
@@ -15,6 +21,12 @@
 	},
 	"action": {
 		"default_popup": "popup.html",
-		"default_title": "ArchiveBridge"
+		"default_title": "ArchiveBridge",
+		"default_icon": {
+			"16": "icons/icon-16.png",
+			"32": "icons/icon-32.png",
+			"48": "icons/icon-48.png",
+			"128": "icons/icon-128.png"
+		}
 	}
 }

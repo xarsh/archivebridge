@@ -4,29 +4,42 @@
 		<meta charset="utf-8" />
 		<title>ArchiveBridge</title>
 		<style>
+			html {
+				color-scheme: light dark;
+			}
 			body {
-				width: 224px;
+				width: 280px;
 				margin: 0;
-				padding: 8px;
-				font: 13px system-ui, sans-serif;
+				padding: 4px;
+				font: 14px system-ui, sans-serif;
 				color: canvastext;
 				background: canvas;
 			}
 			button {
-				display: block;
+				display: flex;
+				align-items: center;
 				width: 100%;
-				padding: 8px 10px;
-				margin: 0 0 6px;
+				height: 40px;
+				box-sizing: border-box;
+				padding: 0 12px;
+				margin: 0;
 				font: inherit;
 				text-align: left;
-				border: 1px solid color-mix(in srgb, canvastext 25%, transparent);
+				border: none;
 				border-radius: 6px;
-				background: color-mix(in srgb, canvastext 5%, transparent);
+				background: transparent;
 				color: inherit;
 				cursor: pointer;
 			}
 			button:hover:enabled {
-				background: color-mix(in srgb, canvastext 12%, transparent);
+				background: color-mix(in srgb, canvastext 8%, transparent);
+			}
+			button:active:enabled {
+				background: color-mix(in srgb, canvastext 14%, transparent);
+			}
+			button:focus-visible {
+				outline: 2px solid Highlight;
+				outline-offset: -2px;
 			}
 			button:disabled {
 				cursor: default;
@@ -34,18 +47,23 @@
 			}
 			#status {
 				margin: 0;
-				min-height: 1.4em;
 				font-size: 12px;
 				color: color-mix(in srgb, canvastext 65%, transparent);
 				overflow-wrap: anywhere;
+			}
+			#status:empty {
+				display: none;
+			}
+			#status:not(:empty) {
+				margin: 4px 12px 0;
 			}
 			#status.error {
 				color: #b3261e;
 			}
 			#file-access {
-				margin: 6px 0 0;
+				margin: 4px 12px 0;
 				padding-top: 6px;
-				border-top: 1px solid color-mix(in srgb, canvastext 18%, transparent);
+				border-top: 1px solid color-mix(in srgb, canvastext 12%, transparent);
 				font-size: 11px;
 				line-height: 1.4;
 				color: color-mix(in srgb, canvastext 65%, transparent);
