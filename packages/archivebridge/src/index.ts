@@ -21,6 +21,27 @@ export { detectArchiveFormatFromBytes, detectArchiveFormatFromFilename } from '.
  * reads a `cid:` reference back.
  */
 export { encodeCidUri } from './mhtml/frames.ts'
+/**
+ * Exported for archive *producers*, and for the one thing a capture cannot
+ * do for itself. An ArchiveBridge-authored capture that archives a page's
+ * frames as parts of its own archive has to point each frame container at
+ * the part holding that frame's document — an edit to untrusted HTML, which
+ * `apps/extension` must not be doing with a regex or a parser of its own
+ * (CONTRIBUTING.md, "Boundaries to keep"), and which the library already
+ * owns the machinery for: parse5 for source offsets, a splice for the edit,
+ * no reserialization of anything.
+ *
+ * It is a *second* entry point rather than a widening of the internal
+ * value-keyed one because the two callers hold different join keys. A
+ * converter matches frames by URL; a capture matches them by identity, and
+ * two `<iframe>`s can share a `src`, so a value-keyed rewrite cannot
+ * express "this container, not the identical one beside it". What the
+ * library can verify is a DOM ordinal, so that — named as such — is what
+ * the API takes; translating a browsing-context index into one stays with
+ * the browser-specific code that can observe both. Nothing else about the
+ * walk is exposed.
+ */
+export { type FrameContainerRewriteResult, rewriteFrameContainerSrcAttributes } from './mhtml/html-rewrite.ts'
 export { extractMhtmlRootTitle } from './mhtml/html-title.ts'
 export type { ContentType } from './mhtml/mime-header.ts'
 /**

@@ -492,6 +492,25 @@ Consequences for ArchiveBridge's own model:
   `plist` is in CONTRIBUTING.md's dependency policy: untrusted HTML input
   is exactly the case where a battle-tested implementation beats a
   hand-rolled one. See `packages/archivebridge/src/mhtml/html-rewrite.ts`.
+- **A capture rewrites the same attribute, but keys it by position, not
+  by URL.** A converter reading a `.webarchive` has no join key other
+  than the frame's URL, and matching by value is correct there. A
+  producer capturing a live page has a better one and must use it:
+  two `<iframe>`s can share a `src`, a frame may have navigated since
+  load, and a `srcdoc` frame has no `src` at all, so a value-keyed
+  rewrite cannot say *which* container a captured document belongs to.
+  `rewriteFrameContainerSrcAttributes` (exported from the library's
+  public entry point) takes a map keyed by a frame container's **DOM
+  ordinal** — its index among the document's `<iframe>`/`<frame>`
+  elements in tree order, counting containers with no `src` so that an
+  unrewritable one cannot hand its position to its neighbour. It shares
+  the same parse5-offsets-and-splice machinery, so the "never
+  reserialize" property is the same one, and a requested rewrite that
+  cannot be located fails closed with a diagnostic rather than landing
+  on a different element. Deliberately *not* a browsing-context index:
+  `window.frames` order is not DOM order (measured), the library cannot
+  observe a browsing context, and the browser-specific capture code —
+  the only side that can see both — owns that translation.
 - **Converting flat MHTML frame parts back into a WebArchive tree** is
   the inverse: find `cid:`-referenced `text/html` parts, treat each as a
   subframe root, recursively rebuild `WebSubframeArchives`, and rewrite
