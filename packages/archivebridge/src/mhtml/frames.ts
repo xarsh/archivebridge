@@ -42,25 +42,53 @@ export interface ContentIdIndex {
 }
 
 /**
- * Indexes every part's Content-ID, tracking which ones are claimed by more
- * than one part. Shared by {@link findFrameRootReferences} and
- * `convert/to-web-archive.ts`'s own `cid:` -> URL rewrite so both agree on one
+ * Every Content-ID one part claims. A part's identity can be written two
+ * ways, and real producers use both: the `Content-ID` header, and a
+ * synthetic `cid:` *Content-Location* for inline content with no natural
+ * URL (see `model/mhtml.ts` — Blink writes exactly that for the stylesheet
+ * it inlines, with no `Content-ID` header at all). A `cid:` reference names
+ * either one, so both have to be in the index or a real, extremely common
+ * capture shape resolves to nothing.
+ */
+function contentIdsOf(part: MhtmlPart): readonly string[] {
+	const contentIds: string[] = []
+	if (part.contentId !== undefined) {
+		contentIds.push(part.contentId)
+	}
+	const locationContentId = part.location === undefined ? undefined : decodeCidUri(part.location)
+	if (locationContentId !== undefined && locationContentId !== part.contentId) {
+		contentIds.push(locationContentId)
+	}
+	return contentIds
+}
+
+/**
+ * Indexes every Content-ID every part claims, tracking which ones are
+ * claimed by more than one part. Shared by {@link findFrameRootReferences},
+ * `convert/cid-references.ts`'s `cid:` -> URL rewrite and
+ * `view/resources.ts`'s reference resolution, so all three agree on one
  * ambiguity analysis rather than each independently re-deriving it (and, in
- * `to-web-archive.ts`'s case, redundantly re-reporting the same
+ * the converter's case, redundantly re-reporting the same
  * `duplicate-content-id` this function's caller may have already reported).
+ *
+ * An ambiguous Content-ID keeps whichever part claimed it first in
+ * `indexByContentId`, but every caller is expected to check
+ * `ambiguousContentIds` first and refuse to resolve rather than silently
+ * pick that part (docs/architecture.md, "Content-ID: preservation,
+ * generation, and identity").
  */
 export function indexContentIds(document: MhtmlDocument): ContentIdIndex {
 	const indexByContentId = new Map<string, number>()
 	const ambiguousContentIds = new Set<string>()
 	document.parts.forEach((part, index) => {
-		if (part.contentId === undefined) {
-			return
+		for (const contentId of contentIdsOf(part)) {
+			const claimed = indexByContentId.get(contentId)
+			if (claimed !== undefined && claimed !== index) {
+				ambiguousContentIds.add(contentId)
+				continue
+			}
+			indexByContentId.set(contentId, index)
 		}
-		if (indexByContentId.has(part.contentId)) {
-			ambiguousContentIds.add(part.contentId)
-			return
-		}
-		indexByContentId.set(part.contentId, index)
 	})
 	return { indexByContentId, ambiguousContentIds }
 }

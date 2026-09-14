@@ -1,12 +1,15 @@
 /**
  * MHTML -> WebArchive: the inverse of `to-mhtml.ts`. Finds `cid:`-referenced
  * `text/html` parts via `mhtml/frames.ts`, recursively rebuilds
- * `WebSubframeArchives`, rewrites each `cid:` reference in the emitted HTML
- * back to a plain resolved URL (WebArchive's `<iframe src>` is never
- * `cid:`-rewritten in real Safari/WebKit output), and reads the metadata
- * sidecar (if present) to repopulate `WebResourceResponse`/
- * `WebResourceFrameName`/`extra`. See docs/architecture.md, "Frame
- * representation" and "Direct WebArchive <-> MHTML conversion".
+ * `WebSubframeArchives`, rewrites every `cid:` reference in the emitted HTML
+ * and CSS to the URL the part it names receives in the converted archive
+ * (`convert/cid-references.ts` — WebArchive has no Content-ID concept and
+ * WebKit's loader never attempts a `cid:` URL, so a reference carried over
+ * verbatim would simply never load), and reads the metadata sidecar (if
+ * present) to repopulate `WebResourceResponse`/`WebResourceFrameName`/
+ * `extra`. See docs/architecture.md, "Frame representation",
+ * "`cid:` references across conversion" and "Direct WebArchive <-> MHTML
+ * conversion".
  *
  * **Subresource ownership is not a structural property of flat MHTML** —
  * unlike WebArchive, where every document level has its own explicit
@@ -24,51 +27,20 @@
  * might have used.
  */
 
-import { buildFrameTree, decodeCidUri, encodeCidUri, findFrameRootReferences, groupPartsByFrame, indexContentIds, type MhtmlFrameNode } from '../mhtml/frames.ts'
-import { findFrameSrcLocations, rewriteFrameSrcAttributes } from '../mhtml/html-rewrite.ts'
+import { assignWebArchiveUrls, type CidReferenceResolver, isRewritableTextPart, rewriteCidReferencesInCss, rewriteCidReferencesInHtml } from '../convert/cid-references.ts'
+import { buildFrameTree, findFrameRootReferences, groupPartsByFrame, indexContentIds, type MhtmlFrameNode } from '../mhtml/frames.ts'
 import { findSidecarPart, findSidecarPartIndices, parseSidecarPart, type SidecarData } from '../mhtml/sidecar.ts'
 import { isSafelyReencodable, textCodecFor } from '../mhtml/text-codec.ts'
 import type { Diagnostic } from '../model/archive.ts'
 import type { MhtmlDocument, MhtmlPart } from '../model/mhtml.ts'
 import type { WebArchiveDocument, WebArchiveResource } from '../model/webarchive.ts'
 
-/**
- * A part's Content-Location if it has one, else a synthetic `cid:` URL (the
- * same fallback convention `MhtmlPart.location`'s own doc comment describes
- * for inline content with no natural URL). A part with *neither* a
- * Content-Location nor a Content-ID has no real identity to report at all —
- * `WebArchiveResource.url` is a required `string`, so this falls back to a
- * synthetic, per-part-index placeholder (never colliding with a real URL or
- * with another identity-less part's placeholder) and reports a diagnostic
- * every time, rather than silently returning `''` (which every identity-less
- * part in one document would share, itself an unreported
- * `duplicate-content-location`-shaped bug). The placeholder uses the `about:`
- * scheme deliberately: it is not a fetchable URL, consistent with an archive
- * never triggering a network request for a resource this converter had to
- * invent an identity for (docs/architecture.md#security-assumptions).
- */
-function resourceUrlFor(part: MhtmlPart, partIndex: number, diagnostics: Diagnostic[]): string {
-	if (part.location !== undefined) {
-		return part.location
-	}
-	if (part.contentId !== undefined) {
-		return encodeCidUri(part.contentId)
-	}
-	const placeholder = `about:archivebridge-unidentified-part-${partIndex}`
-	diagnostics.push({
-		type: 'malformed-resource',
-		url: placeholder,
-		message: 'MHTML part has neither a Content-Location nor a Content-ID; assigned a synthetic placeholder identity',
-	})
-	return placeholder
-}
-
-function partToWebArchiveResource(part: MhtmlPart, partIndex: number, sidecarData: SidecarData | undefined, diagnostics: Diagnostic[]): WebArchiveResource {
+function partToWebArchiveResource(part: MhtmlPart, url: string, data: Uint8Array, sidecarData: SidecarData | undefined): WebArchiveResource {
 	const entry = part.contentId !== undefined ? sidecarData?.get(part.contentId) : undefined
 	return {
-		url: resourceUrlFor(part, partIndex, diagnostics),
+		url,
 		mimeType: part.mimeType,
-		data: part.data,
+		data,
 		textEncoding: part.textEncoding,
 		// Preserved whenever the sidecar explicitly carries it, regardless of whether this
 		// part is currently resolved as a frame root: WebResourceFrameName has only ever been
@@ -103,75 +75,108 @@ export function convertMhtmlToWebArchive(document: MhtmlDocument): { readonly do
 	// `findSidecarPart` resolved — so a duplicate or malformed sidecar part never falls through
 	// to being grouped as an ordinary page resource (docs/architecture.md, "The sidecar is
 	// auxiliary archive metadata, not a saved-page resource").
-	const resourceIndicesByOwner = groupPartsByFrame(document, frameTree, new Set(findSidecarPartIndices(document)))
+	const sidecarPartIndices = new Set(findSidecarPartIndices(document))
+	const resourceIndicesByOwner = groupPartsByFrame(document, frameTree, sidecarPartIndices)
 
 	// Shares `findFrameRootReferences`'s own ambiguity analysis (mhtml/frames.ts) rather than
 	// re-deriving it independently: a Content-ID claimed by more than one part must never resolve
-	// a `cid:` reference to whichever part happened to be indexed last, and — since
+	// a `cid:` reference to whichever part happened to be indexed last.
+	const { indexByContentId, ambiguousContentIds } = indexContentIds(document)
+	const urlByPartIndex = assignWebArchiveUrls(document, sidecarPartIndices, diagnostics)
+
 	// `findFrameRootReferences` above already scanned every `text/html` part in the whole document
 	// (not just ones reachable from the root) and reported `duplicate-content-id` for every
-	// ambiguous Content-ID actually referenced by a frame `src` — this rewrite below must not
-	// re-report the same ambiguous Content-ID a second time.
-	const { indexByContentId: partIndexByContentId, ambiguousContentIds } = indexContentIds(document)
+	// ambiguous Content-ID a frame `src` actually referenced — so the rewrite below must not
+	// re-report the same ambiguous Content-ID a second time. Seeding from the diagnostics it
+	// produced keeps the two passes in agreement without either having to know the other's rules.
+	const reportedAmbiguousContentIds = new Set(diagnostics.filter((entry) => entry.type === 'duplicate-content-id').map((entry) => entry.contentId))
+
+	const resolveCidReference: CidReferenceResolver = (contentId, reference) => {
+		if (ambiguousContentIds.has(contentId)) {
+			if (!reportedAmbiguousContentIds.has(contentId)) {
+				reportedAmbiguousContentIds.add(contentId)
+				diagnostics.push({ type: 'duplicate-content-id', contentId })
+			}
+			diagnostics.push({ type: 'unresolved-resource', url: reference })
+			return undefined
+		}
+		const targetIndex = indexByContentId.get(contentId)
+		const url = targetIndex === undefined ? undefined : urlByPartIndex[targetIndex]
+		if (url === undefined) {
+			diagnostics.push({ type: 'unresolved-resource', url: reference })
+			return undefined
+		}
+		return url
+	}
+
+	/**
+	 * One part's bytes with every `cid:` reference inside it rewritten.
+	 *
+	 * The rewrite is attempted first and the re-encodability check only
+	 * applies when it actually changed something: a part whose original bytes
+	 * cannot be safely round-tripped through its own declared encoding (a
+	 * stripped BOM, a malformed byte sequence tolerantly decoded to U+FFFD)
+	 * would have to be re-encoded *whole* to apply even a one-attribute edit,
+	 * silently normalizing bytes the edit never touched. So the edit is
+	 * refused entirely rather than partially applied, and the `cid:`
+	 * references are left exactly as they were.
+	 */
+	function rewrittenDataFor(part: MhtmlPart): Uint8Array {
+		const kind = isRewritableTextPart(part)
+		if (kind === undefined) {
+			return part.data
+		}
+		const codec = textCodecFor(part.textEncoding)
+		const originalText = codec.decode(part.data)
+		let rewrittenText: string
+		if (kind === 'css') {
+			rewrittenText = rewriteCidReferencesInCss(originalText, resolveCidReference)
+		} else {
+			const result = rewriteCidReferencesInHtml(originalText, resolveCidReference)
+			rewrittenText = result.html
+			for (const reference of result.unrewritable) {
+				diagnostics.push({
+					type: 'malformed-resource',
+					url: reference,
+					message: 'a cid: reference could not be rewritten because the markup gives its attribute no source location of its own; it is left as written and will not resolve',
+				})
+			}
+		}
+		if (rewrittenText === originalText) {
+			return part.data
+		}
+		if (!isSafelyReencodable(codec, part.data)) {
+			diagnostics.push({ type: 'unsupported-encoding', encoding: part.textEncoding ?? 'utf-8' })
+			return part.data
+		}
+		const encoded = codec.encode(rewrittenText)
+		if (encoded === undefined) {
+			diagnostics.push({ type: 'unsupported-encoding', encoding: part.textEncoding ?? 'utf-8' })
+			return part.data
+		}
+		return encoded
+	}
+
+	const dataByPartIndex = document.parts.map(rewrittenDataFor)
+
+	function resourceFor(partIndex: number): WebArchiveResource | undefined {
+		const part = document.parts[partIndex]
+		const url = urlByPartIndex[partIndex]
+		const data = dataByPartIndex[partIndex]
+		if (part === undefined || url === undefined || data === undefined) {
+			return undefined
+		}
+		return partToWebArchiveResource(part, url, data, sidecarData)
+	}
 
 	function buildDocument(node: MhtmlFrameNode): WebArchiveDocument {
 		const mainPart = document.parts[node.partIndex]
-		if (mainPart === undefined) {
+		const mainResource = resourceFor(node.partIndex)
+		if (mainPart === undefined || mainResource === undefined) {
 			throw new Error('convertMhtmlToWebArchive: frame tree referenced a part index outside document.parts')
 		}
 
-		let mainData = mainPart.data
-		if (mainPart.mimeType.toLowerCase() === 'text/html') {
-			const codec = textCodecFor(mainPart.textEncoding)
-			const originalHtml = codec.decode(mainPart.data)
-			const hasFrameSrc = findFrameSrcLocations(originalHtml).length > 0
-			if (hasFrameSrc && !isSafelyReencodable(codec, mainPart.data)) {
-				// This part's original bytes cannot be safely round-tripped through its own
-				// declared encoding (e.g. a stripped BOM, or a malformed byte sequence tolerantly
-				// decoded to U+FFFD) — rewriting even just the frame-src attribute would require
-				// re-encoding the *whole* document, silently normalizing bytes the edit never
-				// touched. Refuse the rewrite entirely rather than partially applying it; the
-				// `cid:` reference is left exactly as it was, unresolved to any URL.
-				diagnostics.push({ type: 'unsupported-encoding', encoding: mainPart.textEncoding ?? 'utf-8' })
-			} else if (hasFrameSrc) {
-				const rewrittenHtml = rewriteFrameSrcAttributes(originalHtml, (currentValue) => {
-					const cid = decodeCidUri(currentValue)
-					if (cid === undefined) {
-						return undefined
-					}
-					if (ambiguousContentIds.has(cid)) {
-						// `findFrameRootReferences` already scanned every `text/html` part in the
-						// document (not just this reachable subtree) and reported
-						// `duplicate-content-id` once for every ambiguous Content-ID actually
-						// referenced by a frame `src` — reporting it again here would duplicate
-						// that diagnostic for the same logical ambiguity.
-						diagnostics.push({ type: 'unresolved-resource', url: currentValue })
-						return undefined
-					}
-					const targetIndex = partIndexByContentId.get(cid)
-					const target = targetIndex === undefined ? undefined : document.parts[targetIndex]
-					if (target === undefined || targetIndex === undefined) {
-						diagnostics.push({ type: 'unresolved-resource', url: currentValue })
-						return undefined
-					}
-					return resourceUrlFor(target, targetIndex, diagnostics)
-				})
-				if (rewrittenHtml !== originalHtml) {
-					const encoded = codec.encode(rewrittenHtml)
-					if (encoded !== undefined) {
-						mainData = encoded
-					} else {
-						diagnostics.push({ type: 'unsupported-encoding', encoding: mainPart.textEncoding ?? 'utf-8' })
-					}
-				}
-			}
-		}
-
-		const mainResource = partToWebArchiveResource({ ...mainPart, data: mainData }, node.partIndex, sidecarData, diagnostics)
-		const subresources = (resourceIndicesByOwner.get(node.partIndex) ?? [])
-			.map((index) => ({ index, part: document.parts[index] }))
-			.filter((entry): entry is { index: number; part: MhtmlPart } => entry.part !== undefined)
-			.map(({ index, part }) => partToWebArchiveResource(part, index, sidecarData, diagnostics))
+		const subresources = (resourceIndicesByOwner.get(node.partIndex) ?? []).map(resourceFor).filter((resource): resource is WebArchiveResource => resource !== undefined)
 		const subframeArchives = node.children.map(buildDocument)
 		const entry = mainPart.contentId !== undefined ? sidecarData?.get(mainPart.contentId) : undefined
 

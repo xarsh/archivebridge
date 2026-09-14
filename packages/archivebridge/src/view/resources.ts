@@ -16,7 +16,7 @@
  * depend on heuristics rather than on what was captured.
  */
 
-import { decodeCidUri } from '../mhtml/frames.ts'
+import { decodeCidUri, indexContentIds } from '../mhtml/frames.ts'
 import type { Diagnostic } from '../model/archive.ts'
 import type { MhtmlDocument } from '../model/mhtml.ts'
 
@@ -51,40 +51,42 @@ function normalizeUrl(value: string, base?: string): string | undefined {
 	return url.href
 }
 
-/** Builds the lookup index for `document`, reporting ambiguous identities as diagnostics. */
+/**
+ * Builds the lookup index for `document`, reporting ambiguous identities as
+ * diagnostics.
+ *
+ * The Content-ID half is {@link indexContentIds}'s, not a second
+ * implementation: a `cid:` reference has to resolve to the same part here,
+ * in `mhtml/frames.ts`'s frame linkage and in `convert/cid-references.ts`'s
+ * conversion rewrite, or the viewer and the converter disagree about what an
+ * archive contains. That index already covers both ways a part can claim an
+ * identity — the `Content-ID` header and a synthetic `cid:`
+ * `Content-Location` (a real producer convention for inline content with no
+ * natural URL; see model/mhtml.ts). Such a location is an alias for the
+ * part's own identity rather than a URL, so it is deliberately absent from
+ * the URL index below.
+ */
 export function indexArchiveResources(document: MhtmlDocument, diagnostics: Diagnostic[]): ArchiveResourceIndex {
 	const partIndexByUrl = new Map<string, number>()
 	const ambiguousUrls = new Set<string>()
-	const partIndexByContentId = new Map<string, number>()
-	const ambiguousContentIds = new Set<string>()
 
 	document.parts.forEach((part, index) => {
-		if (part.location !== undefined) {
-			const cid = decodeCidUri(part.location)
-			// A synthetic `cid:` Content-Location (a real producer convention for
-			// inline content with no natural URL — see model/mhtml.ts) is an alias
-			// for this part's own identity, not a URL; it is reachable through the
-			// Content-ID index instead.
-			const key = cid === undefined ? normalizeUrl(part.location) : undefined
-			if (key !== undefined) {
-				if (partIndexByUrl.has(key)) {
-					ambiguousUrls.add(key)
-				} else {
-					partIndexByUrl.set(key, index)
-				}
-			}
-			if (cid !== undefined && !partIndexByContentId.has(cid)) {
-				partIndexByContentId.set(cid, index)
-			}
+		if (part.location === undefined || decodeCidUri(part.location) !== undefined) {
+			return
 		}
-		if (part.contentId !== undefined) {
-			if (partIndexByContentId.has(part.contentId) && partIndexByContentId.get(part.contentId) !== index) {
-				ambiguousContentIds.add(part.contentId)
-			} else {
-				partIndexByContentId.set(part.contentId, index)
-			}
+		const key = normalizeUrl(part.location)
+		if (key === undefined) {
+			return
+		}
+		if (partIndexByUrl.has(key)) {
+			ambiguousUrls.add(key)
+		} else {
+			partIndexByUrl.set(key, index)
 		}
 	})
+
+	const { indexByContentId, ambiguousContentIds } = indexContentIds(document)
+	const partIndexByContentId = new Map(indexByContentId)
 
 	for (const url of ambiguousUrls) {
 		partIndexByUrl.delete(url)

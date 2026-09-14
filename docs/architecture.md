@@ -674,6 +674,98 @@ it." Each converter is responsible for:
   WebArchive-only fields don't map onto MHTML natively (next
   subsection).
 
+### `cid:` references across conversion
+
+**MHTML's `cid:` linkage does not survive into WebArchive as-is, and the
+converter is what has to resolve it.** WebArchive has no Content-ID
+concept: WebKit substitutes an archived resource by matching a *resource
+load* against its `WebResourceURL`, and `cid:` is not a scheme WebKit's
+loader will attempt for an `<img src>`, a `<link href>` or a CSS `url()`.
+So a `cid:` reference carried across verbatim produces a structurally
+faithful `.webarchive` in which that reference simply never loads — the
+resource is present, addressable, and unreachable. This is not an exotic
+case: Blink writes every inlined `<style>` element as a separate part with
+`Content-Location: cid:css-<uuid>@mhtml.blink`, linked by
+`<link rel="stylesheet" href="cid:css-…">`.
+
+The rule is one rule, applied to every reference site rather than to a
+list of interesting ones:
+
+- **Every referenceable part gets a `WebResourceURL` that preserves its
+  identity.** A part with a real `Content-Location` keeps it. A part whose
+  only identity is a Content-ID — written either as the `Content-ID` header
+  or as a synthetic `cid:` `Content-Location`, both of which real producers
+  emit — gets a deterministic, loadable synthetic URL,
+  `https://content-id.archivebridge.invalid/<percent-encoded-id>`. A part
+  with neither identity gets the existing deliberately unloadable
+  `about:archivebridge-unidentified-part-N` placeholder plus a diagnostic;
+  nothing can legitimately reference such a part, so inventing a loadable
+  identity would create semantics the source archive never had.
+- **Every `cid:` reference in every `text/html` and `text/css` part is
+  rewritten to the URL of the part it names**, so the reference and the
+  `WebResourceURL` are the same string by construction rather than by two
+  computations that agree.
+- **A reference that does not resolve is left exactly as written**, plus
+  an `unresolved-resource` diagnostic — no target is invented for a `cid:`
+  naming no part or an ambiguous Content-ID. A leftover `cid:` is inert in
+  every consumer, so tolerating it costs fidelity and nothing else.
+
+Five properties of the synthetic namespace are load-bearing, and all five
+are requirements rather than preferences:
+
+| Property | Why |
+| --- | --- |
+| Absolute | Independent of whatever base URL the converted document ends up with |
+| Deterministic, stable within one conversion | The reference written into the markup and the URL written into the plist must be the same string |
+| Collision-safe | Distinct Content-IDs percent-encode to distinct path segments, and the assignment additionally refuses to give two parts one URL — including when an archive plants a crafted `Content-Location` inside this namespace. "One URL" is decided by *canonical* comparison, not string equality: `https://CONTENT-ID.ARCHIVEBRIDGE.INVALID:443/x` and `https://content-id.archivebridge.invalid/x` are one resource to any consumer that parses a URL before matching it, so a hostile `Content-Location` spelled that way must not be allowed to shadow a synthetic one. Only the comparison key is normalized — a real `Content-Location` is still written exactly as the source spelled it |
+| `https:`, not `cid:`/`about:`/`data:` | WebKit only offers the archive's resource table a chance to satisfy a load it would actually attempt. Measured in a `WKWebView` on a converted archive: `<img src>`, `<link rel=stylesheet>`, CSS `url()`, frame `src`, and an `@font-face` `src` all resolve from this namespace — the last being the one worth checking, since a webfont is CORS-restricted and the namespace is a different origin from the archived page, and it was probed in the shape conversion produces (a synthetic-namespace sheet loading a synthetic-namespace font). Script-initiated loads and media byte-range requests are not claimed, having not been measured |
+| `.invalid` host | RFC 2606 reserves the TLD so it can never be delegated, so a reference minted here can only ever be satisfied from *inside* the archive — a consumer that failed to substitute it fails locally rather than asking a real server, which is the same guarantee "Security assumptions" makes everywhere else |
+
+Two consequences worth stating, because both look like omissions:
+
+- **The reverse direction does not undo the mapping.** WebArchive → MHTML
+  treats a synthetic URL as the ordinary `Content-Location` it now is. A
+  round trip therefore preserves *semantic resource linkage*, not the
+  original `cid:` spelling — which is exactly the standard
+  "Semantic losslessness" below already sets.
+- **Conversion translates; it does not sanitize.** A `cid:` `<script src>`
+  is rewritten like any other reference, because a `<script src="https://…">`
+  already crosses untouched and refusing to *render* archived script is
+  the viewer's job (see "The security contract, as rules"). A second place
+  deciding what an archive may contain is how the two end up disagreeing,
+  and a format translator is the wrong one to be making that call.
+
+The reference sites are found with `view/html-sites.ts` — both its walk
+and its `classifyHtmlSite`, the same two the viewer uses to reach every
+reference a browser would load — plus `view/css-rewrite.ts`'s scanner,
+rather than a second enumeration. That sharing is the point: a "which
+attributes can name a resource" list that exists twice is how one copy
+quietly falls behind, and a site missing from such a list is invisible,
+because it looks exactly like a resource the archive never had.
+
+`classifyHtmlSite` is deliberately **policy-neutral**. It answers only
+what a browser does with a value — this site holds a loadable URL, this
+one a `srcset` candidate list, this one a CSS value, this one nested
+markup, this one nothing — and every fact in it is measured browser
+behaviour rather than a decision. The two callers then apply opposite
+policies to the same answer: the viewer neutralizes a `script` or
+`navigation` role and mints a viewer-owned URL for a `resource` one, while
+the converter translates a `cid:` reference in any role that can name a
+part. `srcset`/`imagesrcset` is parsed by a shared parser for the same
+reason: its value is a *list* of references and has to be parsed as one.
+
+**Classifying the site is what makes this a translation rather than an
+edit.** Matching on the shape of a *value* — "does it look like a `cid:`
+URI?" — cannot distinguish a reference from page content that merely
+spells one, and an archive is full of attributes that can hold arbitrary
+text: `id`, `class`, `data-*`, `<input value>`, `title`, `alt`,
+`aria-label`. Rewriting `id="cid:x"` into a URL because the archive
+happens to contain a part named `x` would break every selector and
+fragment reference naming that id and change text the reader sees, which
+is editing the page, not converting it. So a site classified as holding no
+reference is left strictly alone, and `<base href>` — a URL, but the
+*input* to reference resolution rather than a reference — is too.
+
 ### Metadata sidecar
 
 Standard MHTML has no field for `WebResourceResponse`,

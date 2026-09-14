@@ -81,15 +81,15 @@
  *    refused rather than shipped with the original reference still live.
  * 9. A reference whose target the browser would parse as *more content*
  *    this module never saw is refused, not resolved: an SVG `<use>` naming
- *    another document ({@link SVG_USE_TAG}), a `data:` stylesheet, a
+ *    another document (the `svg-use` role of {@link HtmlUrlRole}), a `data:` stylesheet, a
  *    `data:` frame. Each was measured to load its own references — the
  *    `<use>` case from inside the viewer — so "it carries its own bytes"
  *    is true of a `data:` image and false of a `data:` document.
  * 10. CSS values in attribute form are rewritten too, not just `style=`:
  *    SVG's `fill`, `stroke`, `filter`, `mask`, `clip-path` and `marker-*`
  *    presentation attributes fetch a `url()` with no script, stylesheet or
- *    `style=` anywhere (measured — see
- *    {@link SVG_URL_PRESENTATION_ATTRIBUTES}).
+ *    `style=` anywhere (measured — see `view/html-sites.ts`'s
+ *    `SVG_URL_PRESENTATION_ATTRIBUTES`).
  *
  * The caller still owns isolation — a sandboxed frame and a restrictive
  * CSP (see `apps/extension/src/core/viewer-policy.ts`). These rules are
@@ -102,7 +102,7 @@ import { resolveDocumentBaseUrl } from '../mhtml/html-rewrite.ts'
 import type { Diagnostic } from '../model/archive.ts'
 import type { MhtmlDocument, MhtmlPart } from '../model/mhtml.ts'
 import { rewriteCssReferences } from './css-rewrite.ts'
-import { type HtmlEdit, type HtmlSite, htmlAttributeMarkup, rewriteHtmlSites } from './html-sites.ts'
+import { classifyHtmlSite, type HtmlEdit, type HtmlSite, htmlAttributeMarkup, linkRelTokens, parseSrcset, rewriteHtmlSites } from './html-sites.ts'
 import { type ArchiveResourceIndex, indexArchiveResources, resolveReference } from './resources.ts'
 
 /**
@@ -234,43 +234,6 @@ export interface MhtmlRenderResult {
 
 const HTML_MIME_TYPES = new Set(['text/html', 'application/xhtml+xml', 'application/xml+xhtml'])
 
-/** `rel` values whose `href` is a real resource the reconstructed document should still load. Everything else a `<link>` can say is neutralized as a network-hint/metadata-shaped reference — see {@link visitLink}. */
-const FETCHED_LINK_RELS = new Set(['stylesheet', 'icon', 'shortcut icon', 'apple-touch-icon', 'apple-touch-icon-precomposed', 'mask-icon'])
-
-/**
- * Attributes that name a resource to load, per element. Frame and
- * stylesheet sites are handled separately, since they produce documents and
- * rewritten CSS rather than opaque bytes.
- *
- * The `background` entries are the presentational attribute HTML has
- * declared obsolete and every engine still implements. Chromium loads it on
- * exactly `body`, `table`, `thead`, `tbody`, `tfoot`, `tr`, `td` and `th`
- * and ignores it everywhere else (measured, Chromium 153) — so it is a
- * genuine external image reference, reachable with no script and no CSS,
- * and the list is the measured one rather than a guess.
- */
-const RESOURCE_ATTRIBUTES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-	['img', new Set(['src'])],
-	['source', new Set(['src'])],
-	['video', new Set(['src', 'poster'])],
-	['audio', new Set(['src'])],
-	['track', new Set(['src'])],
-	['input', new Set(['src'])],
-	['body', new Set(['background'])],
-	['table', new Set(['background'])],
-	['thead', new Set(['background'])],
-	['tbody', new Set(['background'])],
-	['tfoot', new Set(['background'])],
-	['tr', new Set(['background'])],
-	['td', new Set(['background'])],
-	['th', new Set(['background'])],
-])
-
-const SRCSET_ATTRIBUTES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-	['img', new Set(['srcset'])],
-	['source', new Set(['srcset'])],
-])
-
 /**
  * SVG's declarative animation elements, whose operative attributes are
  * neutralized by {@link neutralizeSvgAnimation}.
@@ -303,95 +266,6 @@ const SVG_ANIMATION_TAGS = new Set(['animate', 'animatecolor', 'animatemotion', 
 /** The attributes that make an SVG animation element do something: what it targets, and what it would assign. Renamed rather than deleted, like inline event handlers, so the reconstructed document still shows what was captured. */
 const SVG_ANIMATION_ATTRIBUTES = new Set(['attributename', 'attributetype', 'to', 'from', 'by', 'values'])
 
-/** SVG elements whose `href`/`xlink:href` names a resource. `<use>` is deliberately absent — see {@link SVG_USE_TAG}. */
-const SVG_RESOURCE_TAGS = new Set(['image', 'feimage', 'filter', 'pattern', 'lineargradient', 'radialgradient', 'textpath', 'mpath', 'tref', 'animate', 'set'])
-
-/**
- * `<use>`, which is the one SVG reference that **instantiates another
- * document's content** rather than reading bytes or an attribute from it —
- * and is therefore refused whenever it does not name a fragment of the
- * document being rendered.
- *
- * **Why it is special, measured rather than assumed.** An external `<use>`
- * target is parsed as an SVG document and the referenced subtree is cloned
- * into the *host* document, where its own references load like any other:
- * Chromium 153 fetched an `<image href="https://…">` inside the referenced
- * `<symbol>`, a `fill="url(https://…)"` inside it, and a further
- * `<use href="https://…">` nested one level deeper. Inside the viewer the
- * same construct reached the network from the archived SVG's bytes (only the
- * CSP stopped it), because those bytes are minted as an opaque resource —
- * this module rewrites the *documents* it reconstructs and the stylesheets
- * they link, not the insides of an image part.
- *
- * Every other external SVG reference was measured *not* to do this:
- * `<image>`, a CSS `background-image`, `fill`/`stroke` naming a
- * `<pattern>`/gradient, `filter`, `mask`, `clip-path`, `marker-*`,
- * `<feImage>`, `<textPath>`, `<mpath>`, `<tref>`, and `<pattern
- * href>`/`<linearGradient href>`/`<filter href>` template inheritance all
- * fetched the SVG and loaded **nothing** from inside it. So the exposure is
- * `<use>` alone, and refusing it is a one-element policy rather than an SVG
- * sanitizer.
- *
- * **What refusing costs.** An archived sprite sheet's icons disappear (with
- * a warning) instead of rendering. That is a small loss made smaller by an
- * existing limitation: a reference minted for an archive part keeps no
- * fragment, so `<use href="sprite.svg#icon">` already rendered the whole
- * sheet rather than the icon. Recursively rewriting SVG parts would be the
- * higher-fidelity answer, and it is not the change to make in the name of
- * security: it means parsing XML with an HTML parser, where a hostile
- * `<b>` forces foreign-content breakout and can hide an attribute from the
- * rewrite, while Chromium's XML parser still loads it.
- */
-const SVG_USE_TAG = 'use'
-
-/**
- * SVG presentation attributes whose value is a CSS value that may contain
- * `url()`, and which therefore go through the same CSS rewrite as a
- * `style=` attribute.
- *
- * The list is measured, not derived: in Chromium 153 exactly `fill`,
- * `stroke`, `filter`, `mask`, `clip-path`, `marker-start`, `marker-mid` and
- * `marker-end`, written as attributes, fetched an external URL named in a
- * `url()` — with no script, no stylesheet and no `style=` attribute
- * involved. `mask-image`, `cursor`, `color`, `stop-color`,
- * `background-image` and the `marker` shorthand did not fetch anything in
- * that position and are left out, the same way {@link RESOURCE_ATTRIBUTES}'
- * `background` list is the measured one.
- */
-const SVG_URL_PRESENTATION_ATTRIBUTES = new Set(['fill', 'stroke', 'filter', 'mask', 'clip-path', 'marker-start', 'marker-mid', 'marker-end'])
-
-const FRAME_TAGS = new Set(['iframe', 'frame'])
-
-/**
- * Elements whose `href` is a hyperlink the reader can click. These keep
- * their link affordance and lose their destination
- * ({@link neutralizeHyperlink}); every other navigation-shaped attribute in
- * {@link NAVIGATION_ATTRIBUTES} is invisible to the reader and is simply
- * neutralized.
- */
-const HYPERLINK_TAGS = new Set(['a', 'area'])
-
-/**
- * Attributes that name somewhere to navigate or submit to, rather than a
- * resource to render. All are neutralized: reaching any of them means
- * leaving the archive, which would tell a server the archive was opened
- * (docs/architecture.md, "Security constraints the viewer must satisfy":
- * links stay non-navigable).
- */
-const NAVIGATION_ATTRIBUTES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-	['a', new Set(['ping'])],
-	['area', new Set(['ping'])],
-	['form', new Set(['action'])],
-	['button', new Set(['formaction'])],
-	['input', new Set(['formaction'])],
-	['img', new Set(['longdesc'])],
-	['blockquote', new Set(['cite'])],
-	['q', new Set(['cite'])],
-	['del', new Set(['cite'])],
-	['ins', new Set(['cite'])],
-	['html', new Set(['manifest'])],
-])
-
 /** A MIME type safe to hand to a `Blob`: one `type/subtype` token pair with optional parameters, and nothing that could carry a newline or a quote out of untrusted archive data. */
 function sanitizeMimeType(mimeType: string): string {
 	const trimmed = mimeType.trim()
@@ -406,48 +280,6 @@ function isHtmlPart(part: MhtmlPart): boolean {
 
 function isCssPart(part: MhtmlPart): boolean {
 	return part.mimeType.trim().toLowerCase() === 'text/css'
-}
-
-/**
- * Splits an `srcset` attribute into its candidates, per the HTML
- * Standard's "parse a srcset attribute" algorithm, reduced to what a
- * rewrite needs: each candidate's URL and the descriptor text that follows
- * it. A URL in `srcset` cannot contain whitespace, and a leading/trailing
- * comma belongs to the list rather than to the URL — the two rules a naive
- * `split(',')` gets wrong.
- */
-function parseSrcset(value: string): readonly { readonly url: string; readonly descriptor: string }[] {
-	const candidates: { url: string; descriptor: string }[] = []
-	let index = 0
-	const isSpace = (character: string | undefined) => character !== undefined && /[\t\n\f\r ]/.test(character)
-	while (index < value.length) {
-		while (isSpace(value[index]) || value[index] === ',') {
-			index += 1
-		}
-		if (index >= value.length) {
-			break
-		}
-		const urlStart = index
-		while (index < value.length && !isSpace(value[index])) {
-			index += 1
-		}
-		let url = value.slice(urlStart, index)
-		let trailingCommas = 0
-		while (url.endsWith(',')) {
-			url = url.slice(0, -1)
-			trailingCommas += 1
-		}
-		const descriptorStart = index
-		if (trailingCommas === 0) {
-			// Descriptors run to the next comma that is not inside parentheses; no
-			// real descriptor uses parentheses, so the next comma ends the candidate.
-			while (index < value.length && value[index] !== ',') {
-				index += 1
-			}
-		}
-		candidates.push({ url, descriptor: value.slice(descriptorStart, index).trim() })
-	}
-	return candidates
 }
 
 /**
@@ -774,6 +606,9 @@ export function renderMhtml(document: MhtmlDocument, options: RenderMhtmlOptions
 			return { markup: htmlAttributeMarkup(`${PRESERVED_ATTRIBUTE_PREFIX}${name}`, value) }
 		}
 
+		// `style` is classified `css` below too; it is handled here so that it
+		// still reaches the CSS rewrite on the two elements whose remaining
+		// attributes the next two checks intercept wholesale.
 		if (name === 'style') {
 			const rewritten = rewriteCss(value, baseUrl, 0)
 			return rewritten === value ? undefined : { markup: htmlAttributeMarkup('style', rewritten) }
@@ -783,39 +618,34 @@ export function renderMhtml(document: MhtmlDocument, options: RenderMhtmlOptions
 			return normalizeLegacyShadowAttribute(site, name, value)
 		}
 
-		if (html && tag === 'base' && name === 'href') {
-			// The archive's base URL is an *input* to resolution (already applied
-			// to every reference in this document); leaving it in the output would
-			// point unrewritten and same-document references off the archive.
-			return { markup: htmlAttributeMarkup(`${PRESERVED_ATTRIBUTE_PREFIX}base-href`, value) }
-		}
-
 		if (html && tag === 'meta') {
 			return normalizeMeta(site, name, value)
 		}
 
-		if ((html && tag === 'script' && (name === 'src' || name === 'href')) || (svg && tag === 'script' && (name === 'href' || name === 'xlink:href'))) {
-			return neutralize(tag, name, value, 'script')
-		}
-
-		if (html && ((tag === 'object' && name === 'data') || (tag === 'embed' && name === 'src') || (tag === 'applet' && (name === 'code' || name === 'archive')))) {
-			return neutralize(tag, name, value, 'plugin')
-		}
-
-		if (html && tag === 'link') {
-			return visitLink(site, name, value, baseUrl)
-		}
-
-		if (html && FRAME_TAGS.has(tag)) {
-			if (name === 'src') {
-				// `refuse`: a `data:text/html` frame is a document whose own markup
-				// this module never rewrote. Measured in Chromium 153 outside the
-				// viewer: such a frame loads its images, runs its script and nests a
-				// further `data:` frame. Inside the viewer only `frame-src blob:`
-				// stopped it, which is a backstop doing a rewrite's job.
-				return resolveAttribute(tag, name, value, baseUrl, (partIndex) => documentUrl(partIndex, depth + 1), 'refuse')
+		// Everything from here on is driven by `html-sites.ts`'s classification
+		// of the site rather than by tables of this module's own. What a browser
+		// does with a value is a fact about browsers, and the viewer and the
+		// MHTML->WebArchive converter have to agree about it or one of them ends
+		// up treating a reference as page data (or page data as a reference).
+		// What each *role* then becomes is this module's policy, and policy is
+		// all that is left below.
+		const classification = classifyHtmlSite(site)
+		switch (classification.kind) {
+			case 'none':
+				return undefined
+			case 'css': {
+				// A CSS-valued attribute goes through the CSS rewrite rather than
+				// through reference resolution: `fill="url(x.png) red"` has a URL
+				// *and* a fallback paint, and `fill="url(#gradient)"` names this
+				// document and must not change.
+				const rewritten = rewriteCss(value, baseUrl, 0)
+				return rewritten === value ? undefined : { markup: htmlAttributeMarkup(name, rewritten) }
 			}
-			if (name === 'srcdoc') {
+			case 'srcset':
+				// A `rel=preload` candidate list is a hint for resources that are
+				// gone; an `<img srcset>` is a real set of references.
+				return classification.role === 'preload' ? neutralize(tag, name, value, 'network-hint') : rewriteSrcset(tag, name, value, baseUrl)
+			case 'html': {
 				// An inline frame document: its references resolve against this
 				// document's base URL (HTML's rule for `about:srcdoc`), and the same
 				// depth bound as a `src` frame covers the recursion — evaluated
@@ -824,52 +654,74 @@ export function renderMhtml(document: MhtmlDocument, options: RenderMhtmlOptions
 				const childDepth = depth + 1
 				if (childDepth > MAX_FRAME_DEPTH) {
 					warn({ type: 'frame-depth-exceeded', depth: childDepth })
-					return { markup: htmlAttributeMarkup('srcdoc', '') }
+					return { markup: htmlAttributeMarkup(name, '') }
 				}
 				const inline = rewriteDocument(value, baseUrl, childDepth)
 				// Same rule as a frame document: markup that could not be fully
 				// rewritten is emptied rather than shipped with a live reference.
-				return { markup: htmlAttributeMarkup('srcdoc', inline.unrewritable ? '' : inline.html) }
+				return { markup: htmlAttributeMarkup(name, inline.unrewritable ? '' : inline.html) }
 			}
-			return undefined
+			case 'url':
+				break
 		}
 
-		if (HYPERLINK_TAGS.has(tag) && (name === 'href' || (svg && name === 'xlink:href'))) {
-			return neutralizeHyperlink(name, value, baseUrl)
+		switch (classification.role) {
+			case 'script':
+				return neutralize(tag, name, value, 'script')
+			case 'plugin':
+				return neutralize(tag, name, value, 'plugin')
+			case 'stylesheet':
+				// `refuse` for the same reason as a frame: a `data:text/css` sheet is
+				// CSS this module never scanned, and its `@import`/`url()` targets are
+				// live (measured).
+				return resolveAttribute(tag, name, value, baseUrl, (partIndex) => stylesheetUrl(partIndex, 0), 'refuse')
+			case 'frame':
+				// `refuse`: a `data:text/html` frame is a document whose own markup
+				// this module never rewrote. Measured in Chromium 153 outside the
+				// viewer: such a frame loads its images, runs its script and nests a
+				// further `data:` frame. Inside the viewer only `frame-src blob:`
+				// stopped it, which is a backstop doing a rewrite's job.
+				return resolveAttribute(tag, name, value, baseUrl, (partIndex) => documentUrl(partIndex, depth + 1), 'refuse')
+			case 'resource':
+				return resolveAttribute(tag, name, value, baseUrl, resourceUrl)
+			case 'hyperlink':
+				// A clickable link keeps its affordance and loses its destination;
+				// every other navigation-shaped attribute is invisible to the reader
+				// and is simply neutralized.
+				return neutralizeHyperlink(name, value, baseUrl)
+			case 'navigation':
+				// Reaching any of these means leaving the archive, which would tell a
+				// server the archive was opened (docs/architecture.md, "Security
+				// constraints the viewer must satisfy": links stay non-navigable).
+				return neutralize(tag, name, value, 'navigation')
+			case 'network-hint': {
+				// The known network hints (`preload`, `prefetch`, `preconnect`,
+				// `dns-prefetch`, `modulepreload`, `manifest`, …) name resources that
+				// no longer exist, and everything else a `<link>` can say
+				// (`alternate`, `canonical`, `author`, an unknown token) is metadata
+				// the browser does not fetch — neutralizing it costs nothing while
+				// removing any doubt about whether some future browser might start
+				// fetching it. The `rel` goes in the label because a `<link href>`
+				// means something different for each one.
+				const relText = [...new Set(linkRelTokens(site.element))].join(' ')
+				return neutralize(tag, name, value, 'network-hint', relText.length === 0 ? name : `${name} [rel=${relText}]`)
+			}
+			case 'svg-use': {
+				// A fragment of the document being rendered is left exactly alone; it
+				// clones markup this module already rewrote. Anything else names
+				// another document, whose contents would be instantiated live — see
+				// rule 9 in this module's header.
+				const resolved = resolveReference(index, value, baseUrl)
+				// A `cid:` reference names a part without naming a URL, so the value
+				// as written is the only thing there is to report.
+				return resolved.kind === 'same-document' ? undefined : neutralize(tag, name, resolved.url ?? value, 'nested-content')
+			}
+			case 'base':
+				// The archive's base URL is an *input* to resolution (already applied
+				// to every reference in this document); leaving it in the output would
+				// point unrewritten and same-document references off the archive.
+				return { markup: htmlAttributeMarkup(`${PRESERVED_ATTRIBUTE_PREFIX}base-href`, value) }
 		}
-		if (html && NAVIGATION_ATTRIBUTES.get(tag)?.has(name) === true) {
-			return neutralize(tag, name, value, 'navigation')
-		}
-
-		if (html && SRCSET_ATTRIBUTES.get(tag)?.has(name) === true) {
-			return rewriteSrcset(tag, name, value, baseUrl)
-		}
-
-		if (html && RESOURCE_ATTRIBUTES.get(tag)?.has(name) === true) {
-			return resolveAttribute(tag, name, value, baseUrl, resourceUrl)
-		}
-		if (svg && tag === SVG_USE_TAG && (name === 'href' || name === 'xlink:href')) {
-			// A fragment of the document being rendered is left exactly alone; it
-			// clones markup this module already rewrote. Anything else names
-			// another document, whose contents would be instantiated live.
-			const resolved = resolveReference(index, value, baseUrl)
-			// A `cid:` reference names a part without naming a URL, so the value as
-			// written is the only thing there is to report.
-			return resolved.kind === 'same-document' ? undefined : neutralize(tag, name, resolved.url ?? value, 'nested-content')
-		}
-		if (svg && SVG_RESOURCE_TAGS.has(tag) && (name === 'href' || name === 'xlink:href')) {
-			return resolveAttribute(tag, name, value, baseUrl, resourceUrl)
-		}
-		if (svg && SVG_URL_PRESENTATION_ATTRIBUTES.has(name)) {
-			// A presentation attribute is a CSS declaration value, so it goes
-			// through the CSS rewrite rather than through reference resolution:
-			// `fill="url(x.png) red"` has a URL *and* a fallback paint, and
-			// `fill="url(#gradient)"` names this document and must not change.
-			const rewritten = rewriteCss(value, baseUrl, 0)
-			return rewritten === value ? undefined : { markup: htmlAttributeMarkup(name, rewritten) }
-		}
-
-		return undefined
 	}
 
 	function normalizeLegacyShadowAttribute(site: HtmlSite, name: string, value: string): HtmlEdit | undefined {
@@ -928,46 +780,6 @@ export function renderMhtml(document: MhtmlDocument, options: RenderMhtmlOptions
 			default:
 				return undefined
 		}
-	}
-
-	function visitLink(site: HtmlSite, name: string, value: string, baseUrl: string): HtmlEdit | undefined {
-		if (site.kind !== 'attribute') {
-			return undefined
-		}
-		if (name === 'imagesrcset') {
-			// A `rel=preload` candidate list: a hint for resources that are gone.
-			return neutralize('link', name, value, 'network-hint')
-		}
-		if (name !== 'href') {
-			return undefined
-		}
-		const rels = new Set(
-			(site.element.attribute('rel') ?? '')
-				.trim()
-				.toLowerCase()
-				.split(/\s+/)
-				.filter((token) => token.length > 0),
-		)
-		const relText = [...rels].join(' ')
-		if (rels.has('stylesheet')) {
-			// `refuse` for the same reason as a frame: a `data:text/css` sheet is
-			// CSS this module never scanned, and its `@import`/`url()` targets are
-			// live (measured).
-			return resolveAttribute('link', name, value, baseUrl, (partIndex) => stylesheetUrl(partIndex, 0), 'refuse')
-		}
-		for (const rel of rels) {
-			if (FETCHED_LINK_RELS.has(rel)) {
-				return resolveAttribute('link', name, value, baseUrl, resourceUrl)
-			}
-		}
-		// Every other rel a `<link href>` can carry is neutralized as a
-		// network-hint/metadata-shaped reference: the known network hints
-		// (`preload`, `prefetch`, `preconnect`, `dns-prefetch`, `modulepreload`,
-		// `manifest`, …) name resources that no longer exist, and everything else
-		// (`alternate`, `canonical`, `author`, an unknown token) is metadata the
-		// browser does not fetch — neutralizing it costs nothing while removing
-		// any doubt about whether some future browser might start fetching it.
-		return neutralize('link', name, value, 'network-hint', relText.length === 0 ? 'href' : `href [rel=${relText}]`)
 	}
 
 	function neutralizeHyperlink(name: string, value: string, baseUrl: string): HtmlEdit | undefined {

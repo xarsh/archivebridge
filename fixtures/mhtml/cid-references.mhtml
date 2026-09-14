@@ -1,0 +1,66 @@
+From: <Saved by ArchiveBridge>
+Snapshot-Content-Location: https://cid-references.invalid/
+Subject: cid: reference surface
+Date: Tue, 1 Jan 2030 00:00:00 -0000
+MIME-Version: 1.0
+Content-Type: multipart/related;
+	type="text/html";
+	boundary="----MultipartBoundary--archivebridge-fixture-cid-references----"
+
+------MultipartBoundary--archivebridge-fixture-cid-references----
+Content-Type: text/html
+Content-ID: <root@archivebridge.test>
+Content-Transfer-Encoding: 8bit
+Content-Location: https://cid-references.invalid/
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cid: reference surface</title>
+<link rel="stylesheet" href="cid:sheet@archivebridge.test">
+<style>
+#style-element { width: 16px; height: 16px; background-image: url(cid:pixels@archivebridge.test); background-size: 100% 100%; }
+</style>
+</head>
+<body>
+<p>Every way an MHTML document can name a part by Content-ID. Each box below
+should show the same 16x16 red/blue checkerboard.</p>
+<img id="plain" src="cid:pixels@archivebridge.test" width="16" height="16" alt="img src">
+<img id="srcset" srcset="cid:pixels@archivebridge.test 1x" width="16" height="16" alt="img srcset">
+<div id="style-element"></div>
+<div id="style-attribute" style="width: 16px; height: 16px; background-image: url(cid:pixels@archivebridge.test); background-size: 100% 100%;"></div>
+<div id="stylesheet-part"></div>
+<svg width="16" height="16"><image href="cid:pixels@archivebridge.test" width="16" height="16"/></svg>
+<img id="missing" src="cid:absent@archivebridge.test" alt="deliberately unresolvable">
+<iframe id="child" src="cid:child@archivebridge.test" width="240" height="60"></iframe>
+</body>
+</html>
+
+------MultipartBoundary--archivebridge-fixture-cid-references----
+Content-Type: text/css
+Content-Transfer-Encoding: 8bit
+Content-Location: cid:sheet@archivebridge.test
+
+body { font: 14px system-ui, sans-serif; }
+#stylesheet-part { width: 16px; height: 16px; background-image: url(cid:pixels@archivebridge.test); background-size: 100% 100%; }
+
+------MultipartBoundary--archivebridge-fixture-cid-references----
+Content-Type: image/png
+Content-ID: <pixels@archivebridge.test>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAKElEQVR42mO4o6HxHxkrRN1BwYTk
+GYaBAaRqQJcfDgaMpoPRdAA0AABmj0AffLWPugAAAABJRU5ErkJggg==
+
+------MultipartBoundary--archivebridge-fixture-cid-references----
+Content-Type: text/html
+Content-ID: <child@archivebridge.test>
+Content-Transfer-Encoding: 8bit
+Content-Location: https://cid-references.invalid/child.html
+
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>child frame</title></head>
+<body><p>child frame, reached by cid:</p></body></html>
+
+------MultipartBoundary--archivebridge-fixture-cid-references------

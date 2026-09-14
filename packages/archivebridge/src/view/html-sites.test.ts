@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { type HtmlSite, htmlAttributeMarkup, rewriteHtmlSites } from './html-sites.ts'
+import { classifyHtmlSite, type HtmlSite, htmlAttributeMarkup, rewriteHtmlSites } from './html-sites.ts'
 
 /** Every site the walk offers, as `namespace/tag@attribute=value` (or `namespace/tag#text=...` for a `<style>` body). */
 function sites(html: string): readonly string[] {
@@ -163,4 +163,74 @@ test('malformed markup degrades to whatever the HTML parser makes of it, never t
 		),
 		'<img src="X" <img src=b.png>',
 	)
+})
+
+/**
+ * The classification, exercised directly rather than through either caller.
+ *
+ * It is the one description of the reference surface — the viewer applies
+ * security policy to it, the MHTML->WebArchive converter applies format
+ * translation to it — so it is pinned here, where neither caller's policy can
+ * hide a change to it.
+ */
+function classify(html: string): readonly string[] {
+	const seen: string[] = []
+	rewriteHtmlSites(html, (site) => {
+		const classification = classifyHtmlSite(site)
+		const where = site.kind === 'attribute' ? site.attribute.name : '#text'
+		seen.push(`${where}=${classification.kind}${'role' in classification ? `/${classification.role}` : ''}`)
+		return undefined
+	})
+	return seen
+}
+
+test('classifies every kind of site a browser loads from', () => {
+	assert.deepEqual(classify('<img src="a" srcset="a 1x" alt="a" id="a">'), ['src=url/resource', 'srcset=srcset/image', 'alt=none', 'id=none'])
+	assert.deepEqual(classify('<link rel="stylesheet" href="a">'), ['rel=none', 'href=url/stylesheet'])
+	assert.deepEqual(classify('<link rel="icon" href="a">'), ['rel=none', 'href=url/resource'])
+	assert.deepEqual(classify('<link rel="preload" href="a" imagesrcset="a 1x">'), ['rel=none', 'href=url/network-hint', 'imagesrcset=srcset/preload'])
+	assert.deepEqual(classify('<link href="a">'), ['href=url/network-hint'], 'an unknown or absent rel is not a resource')
+	assert.deepEqual(classify('<iframe src="a" srcdoc="b" name="c">'), ['src=url/frame', 'srcdoc=html', 'name=none'])
+	assert.deepEqual(classify('<script src="a">'), ['src=url/script'])
+	assert.deepEqual(classify('<object data="a">'), ['data=url/plugin'])
+	assert.deepEqual(classify('<embed src="a">'), ['src=url/plugin'])
+	assert.deepEqual(classify('<a href="a" ping="b">'), ['href=url/hyperlink', 'ping=url/navigation'])
+	assert.deepEqual(classify('<form action="a">'), ['action=url/navigation'])
+	assert.deepEqual(classify('<base href="a">'), ['href=url/base'])
+	assert.deepEqual(classify('<body background="a">'), ['background=url/resource'])
+	assert.deepEqual(classify('<video src="a" poster="b">'), ['src=url/resource', 'poster=url/resource'])
+	assert.deepEqual(classify('<div style="a">'), ['style=css'])
+	assert.deepEqual(classify('<style>a</style>'), ['#text=css'])
+	assert.deepEqual(classify('<svg><image href="a" xlink:href="b"/></svg>'), ['href=url/resource', 'xlink:href=url/resource'])
+	assert.deepEqual(classify('<svg><use href="a"/></svg>'), ['href=url/svg-use'])
+	assert.deepEqual(classify('<svg><rect fill="a" stroke="b" x="c"/></svg>'), ['fill=css', 'stroke=css', 'x=none'])
+})
+
+test('classifies page data as no reference at all, whatever its value looks like', () => {
+	// The converter depends on this: a value that merely *spells* a URL is not
+	// a reference, and rewriting one would edit the archived page's content.
+	assert.deepEqual(classify('<div id="cid:x" class="cid:x" data-key="cid:x" title="url(cid:x)" aria-label="cid:x">'), [
+		'id=none',
+		'class=none',
+		'data-key=none',
+		'title=none',
+		'aria-label=none',
+	])
+	assert.deepEqual(classify('<input value="cid:x" type="text">'), ['value=none', 'type=none'])
+	assert.deepEqual(classify('<div onclick="cid:x">'), ['onclick=none'], 'an event handler holds script, not a URL')
+	assert.deepEqual(classify('<meta http-equiv="refresh" content="0;url=cid:x">'), ['http-equiv=none', 'content=none'], 'a directive with a URL inside a larger grammar')
+	assert.deepEqual(classify('<svg><set attributeName="href" to="cid:x"/></svg>'), ['attributename=none', 'to=none'], 'whether `to` holds a URL depends on `attributeName`')
+})
+
+test('classification follows the namespace, not the spelling', () => {
+	// `fill` is a CSS-valued presentation attribute only in SVG; on a `<div>`
+	// it is inert page data and nothing may rewrite it.
+	assert.deepEqual(classify('<div fill="url(cid:x)">'), ['fill=none'])
+	// And the reverse: SVG's `<image>` loads from `href`, not from `src`, so
+	// `src` there is page data — it is HTML's `<img>` that uses `src`.
+	assert.deepEqual(classify('<svg><image src="a" href="b"/></svg>'), ['src=none', 'href=url/resource'])
+	// `<img>` is one of HTML's foreign-content breakout elements, so this one
+	// really is an HTML `<img>` despite being written inside `<svg>` — the
+	// classification reports what the parser built, which is what loads.
+	assert.deepEqual(classify('<svg><img src="a"/></svg>'), ['src=url/resource'])
 })
