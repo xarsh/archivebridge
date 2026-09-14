@@ -27,8 +27,20 @@ MHTML or WebArchive from a toolbar popup or the page context menu), and
 the **local WebArchive viewer** (opening a `file:///….webarchive` renders
 it in a sandboxed frame from archived bytes alone).
 
-**Planned.** The extension's **Firefox and Safari** capture/save adapters
-and their viewers.
+**Partly implemented — Firefox.** `manifest.firefox.json` →
+`dist-firefox/` is a real build with a real capture behind it, but only
+its **first phase**: the current page's **top document** is captured and
+saved in either format, with live form state, `<canvas>` pixels, open
+shadow roots, `blob:` bytes and markup-referenced images and stylesheets.
+It is development code, not a published Firefox release. Frames,
+`adoptedStyleSheets` and the MAIN-world pass that reaches them, resource
+completeness beyond markup-referenced images and stylesheets, and the
+local-archive viewer are all still to come; the section "The Firefox
+capture pipeline" below describes the whole pipeline and marks what
+exists.
+
+**Planned.** The **Safari** capture/save adapter, and the Firefox and
+Safari viewers.
 
 Sections below discussing non-Chromium browsers are specifying where that
 functionality will fit and what invariants it must respect, not
@@ -1112,6 +1124,14 @@ Archive files are untrusted input. Concretely:
   domains and must be kept separate in the extension's architecture, not
   just by convention in one code path.
 
+Everything above is about *reading* an archive. **Capturing** one touches a
+live page with the extension's privileges and adds its own assumptions —
+an untrusted page-world bridge, a cross-origin canvas read, a credentialed
+re-fetch, and the invariant that a capture makes no network request beyond
+acquiring the resources the page itself referenced. Those are listed under
+"The Firefox capture pipeline" below, because Firefox is the first target
+whose capture is ArchiveBridge's own code rather than a native browser API.
+
 ## CLI
 
 The CLI ships two subcommands, `archivebridge inspect` and
@@ -1221,9 +1241,13 @@ Safari              custom MHTML capture               native messaging to
   MHTML capture API. A from-scratch capture implementation is not
   obligated to reproduce Blink's capture-semantics gaps (see "Format vs.
   capture semantics" above) — it may capture more (or differently) than
-  Chrome does, as long as it stays valid MHTML. A Firefox content script
-  can in fact read live form state, `<canvas>` pixels and cross-origin
-  stylesheet text, all of which Blink's capture drops.
+  Chrome does, as long as it stays valid MHTML. Firefox's extension worlds
+  reach live form state, cross-origin stylesheet text, and `<canvas>`
+  pixels *even on a canvas the page itself has tainted* (that last one
+  only while the extension holds `<all_urls>` — see "Capture-side security
+  assumptions") — all of which Blink's capture drops. One thing they do not reach from one world:
+  `adoptedStyleSheets`, which is why Firefox capture is a two-world
+  pipeline (see "The Firefox capture pipeline" below).
 - **Save** is how captured bytes reach the user's disk, which differs by
   platform: Chrome/Edge and Firefox both have `downloads`, but only
   Firefox's background context can mint a blob URL; Safari has no
@@ -1263,11 +1287,16 @@ second pipeline.
 note that neither is used by, or of any use to, the save path). In
 particular:
 
-- **No web-origin host permission, ever.** Native capture of an ordinary
+- **No web-origin host permission.** Native capture of an ordinary
   `http(s)` tab needs none, which is verified in the E2E suite at both
   build time (the built manifest) and runtime
   (`chrome.permissions.getAll().origins` contains `file:///*` and nothing
-  matching `http`).
+  matching `http`). **This is a property of the Chrome pipeline, not a
+  project-wide principle** — it holds because `pageCapture` is a native
+  API that reads the page without the extension ever touching it. A DOM
+  walk is not that, so Firefox cannot hold it; see "The Firefox capture
+  pipeline" below. The asymmetry is structural, not a shortcut, and the
+  Chrome statement above stays a hard constraint on the Chrome manifest.
 - **No `tabs`/`activeTab`.** `chrome.tabs.query` returns a tab's `id`
   without any permission; `url` and `title` are the gated fields. The
   download file name is derived from the *archive's own* main-resource
@@ -1282,6 +1311,314 @@ in the toolbar popup and in the page context menu, both routed through the
 same `runSaveCommand`. There is no settings screen and no
 archive-conversion UI in the browser: conversion is the CLI's job, and the
 browser surface stays small on purpose.
+
+### The Firefox capture pipeline
+
+> **Status: partly implemented.** The command path, the permission flow,
+> the save path and a **top-document** capture (`src/firefox/`) are real.
+> The isolated pass runs against the top frame only; the MAIN pass and
+> every kind of frame capture are not written. The pipeline below is the
+> whole design; the paragraphs mark what is not there yet.
+
+Firefox has no native MHTML capture API, so its capture is an
+ArchiveBridge-authored DOM walk. The decisions below are settled; the
+measurements behind them were taken on Firefox 152.0.1 and the `128.0`
+floor stands (`content_scripts.world` requires Firefox 128, which is also
+the current ESR line).
+
+```text
+popup button ─┐
+              ├─> runSaveCommand(format, tabId)      background event page
+context menu ─┘        │
+                       ├─ ensure host permission for the tab
+                       ├─ isolated pass   (all frames, world: ISOLATED)
+                       ├─ main pass       (all frames, world: MAIN, narrow)
+                       ├─ merge + acquire resource bytes (background fetch)
+                       ├─ assemble MhtmlDocument + serializeMhtml
+                       │      ── from here on, identical to Chrome ──
+                       ├─ archiveBytesFrom(bytes, format)  core/archive-bytes.ts
+                       └─ saveBytes(...)                   firefox/save.ts
+```
+
+**It is a two-world pipeline, and the ISOLATED world is the primary one.**
+The isolated content-script world does the bulk of the work — markup
+serialization, live form state, canvas pixels, stylesheet text (including
+cross-origin sheets, whose `cssRules` the page itself cannot read), frame
+identity, and `blob:` URL bytes that only the page principal can read. The
+MAIN pass exists for exactly one thing the Xray boundary hides:
+`adoptedStyleSheets` (document and shadow roots), returned as `cssText`
+strings and nothing else. It is deliberately tiny because it is a security
+boundary, not a code-organisation choice. *(Today only the isolated pass
+exists, against the top frame; the MAIN pass arrives with constructed
+stylesheets, and is not built merely because the final shape has one.)*
+
+**The capture never mutates the live page**, and that is an invariant
+rather than a tidiness preference: a page under capture may have
+MutationObservers and script of its own running, so reflecting form state
+or replacing a `<canvas>` in place would be observable, racy, and — if the
+capture failed midway — destructive. `src/firefox/page-capture.ts`
+therefore builds a **separate inert snapshot document**
+(`document.implementation.createHTMLDocument`, which has no browsing
+context and so loads and executes nothing) by recursively cloning the live
+tree, and applies every capture decision to that clone. The live document
+is only ever read. Anything that cannot be done that way needs a stated
+reason, a `finally`, and an answer for failing halfway.
+
+**Firefox capture needs a web-origin host permission, and that is the one
+place its posture differs from Chrome's.** There is no way to read a
+cross-origin frame's DOM or fetch a cross-origin subresource without one;
+`activeTab` covers the top document and same-origin frames only. The
+intended shape is `permissions: ["scripting", "downloads", "menus",
+"activeTab"]` plus **`optional_host_permissions: ["<all_urls>"]`**, so a
+fresh install asks for nothing and the first save explains itself in
+context. `webRequest` is deliberately not requested — it is broad, it
+only sees loads that happen after it registers (so it cannot help a page
+that is already open, which is every page a user presses Save on), and
+everything it offers is approximable from the `fetch` `Response` plus
+Resource Timing.
+
+**The one hard rule that shape imposes:** `permissions.request()` must be
+called **synchronously, as the first thing a user-gesture handler does,
+before any `await`**. Firefox's transient activation does not survive even
+a trivial `await` — the call then rejects immediately with
+`permissions.request may only be called from a user input handler`. A
+`browser.menus.onClicked` handler *is* a valid gesture, so popup and
+context-menu commands can stay behaviorally identical, provided neither
+looks anything up first. Anything a handler would otherwise await must be
+pre-computed before the click.
+
+**Firefox's capture may deliberately exceed Chrome's fidelity floor**, and
+the extra state is expressed in the serialized HTML and in ordinary MIME
+parts — never in a new metadata channel, for the same reason the project
+rejects a cross-format IR. In scope: live form state (see the rule below),
+`<canvas>` pixels, `srcset`/`currentSrc`, constructed stylesheets
+(`adoptedStyleSheets`, appended as `<style>` after the document's own
+sheets, matching adopted sheets' cascade position), CSSOM-mutated
+`<style>` bodies, preload-only resources, and standard
+`<template shadowrootmode>`.
+
+**Live form state is captured, minus a fixed exclusion list**, because
+recording what the user typed is the headline fidelity win over Chrome's
+capture *and* its headline privacy cost. Captured: ordinary text-like
+`input` values, `textarea` text, `checkbox`/`radio` `checked`, and a
+`select`'s selected options. Never captured: `input[type=password]`,
+`input[type=file]`, `input[type=hidden]`, and any control whose
+`autocomplete` token list contains `one-time-code`. An excluded control
+keeps whatever the markup already carried; nothing is redacted, because
+refusing to *copy* a live value and *removing* a served one are different
+acts and only the first is the capture's business. One consequence is
+worth stating so it is not mistaken for a gap: `<input type=hidden>`'s
+`value` IDL attribute is in the spec's "default" mode, so assigning to it
+writes the content attribute — a page that changes a hidden field has
+already changed its own markup, and there is no live hidden value distinct
+from it for any DOM-serializing capture to exclude.
+
+**Closed shadow roots are not in the Firefox MVP.** Reaching them needs an
+`Element.prototype.attachShadow` hook installed at `document_start`, which
+cannot be added to an already-open tab — so it is an always-on cost rather
+than a per-save one, it is page-detectable and page-defeatable, and any
+fidelity claim about it would have to say "best effort".
+
+**A captured `<canvas>` becomes a static `<img src="cid:…">`, not a
+`<canvas>` with `background-image: url(cid:…)`.** Both were measured
+across three viewers: the `<img>` renders in ArchiveBridge's own viewer and
+in Chrome's native MHTML viewer, while `background-image` renders in
+neither — Chrome's MHTML parser resolves `cid:` for `<img src>` and not
+for a CSS `url()`, which is an external gap ArchiveBridge cannot close.
+The cost is real and accepted: the archive no longer contains an actual
+`<canvas>` element. It is the same trade the rest of this list already
+makes, recording more than the DOM literally contained. Separately, and
+regardless of representation, **captured replacement content must carry an
+explicit CSS `width`/`height`**: an element relying on the default
+canvas-sizing algorithm collapses to 0×0 when the document is loaded as
+MHTML, reproduced identically in ArchiveBridge's viewer and in Chrome's
+own native MHTML viewer.
+
+**Redirects and credentials.** Resource acquisition runs in the
+background, where `fetch` is privileged, and decides per URL whether the
+user's cookies may go with it: the page's own origin yes, everything else
+no. That decision is made about *one URL*, and `redirect: 'follow'` does
+not respect it. Measured, in a real Firefox, from an extension page
+holding `<all_urls>`: a same-origin URL answering `302` to a second origin
+had the **second origin's cookies** sent to it. A page needs only one
+same-origin reference to turn a save into a credentialed cross-site
+request it never made.
+
+Following the chain by hand, re-evaluating the policy at each hop, is not
+available: `redirect: 'manual'` in Firefox produces an opaque-redirect
+filtered response — status `0`, no headers, **no `Location`** — so the
+target is unknowable (Node/undici, where the unit tests run, instead hands
+back the `3xx` itself; both are handled). So Phase 1 takes the smallest
+safe shape instead:
+
+- an **uncredentialed** request follows redirects normally — there is
+  nothing to leak, and the platform bounds the chain itself (measured:
+  Firefox stops after 20 redirects, as does Node);
+- a **credentialed** request uses `redirect: 'manual'`, which stops the
+  chain with the cookies still on the origin they belonged to, and is then
+  re-run from the original URL with `credentials: 'omit'` if it turns out
+  to have redirected.
+
+At most two requests per resource, at most the first carrying cookies, and
+the bound is structural rather than a counter. The cost is stated rather
+than hidden: a resource behind *any* redirect is archived as whatever a
+logged-out client gets, and that produces a diagnostic. The part keeps the
+URL the page referenced — the archived markup names that one — and the
+final URL is diagnostic information, never a silent replacement for it.
+
+**One save collects a bounded amount.** A page is untrusted input, and a
+save is one user gesture, so every dimension the page controls is bounded
+in `src/firefox/capture-limits.ts`: how many resources are fetched, how
+many `blob:` URLs are read, how large one response or one blob may be, how
+many bytes all of them together may be, how many canvases are snapshotted,
+and how many pixels one canvas may hold. Four details are the substance
+rather than the numbers.
+
+A body — a network response in the background, or a `blob:` read in the
+page, which is the one kind of acquisition only the page principal can do
+— is read by a **reader that stops at the bound**, because `Content-Length`
+is absent on a chunked response and is a claim rather than a fact when
+present (both measured), and because a `Blob`'s own `size` is a bound read
+*after* the platform was asked to produce the body. A resource that crosses
+the bound contributes *nothing*, never a truncated prefix archived as if it
+were whole.
+
+A canvas is checked **before** `toDataURL`, because the encode is where the
+allocation happens, and the count bounds **attempts rather than successful
+snapshots**: a page chooses how many of its canvases fail — tainted, past
+the pixel bound, or offered after the byte budget is spent — and a bound
+counted in successes would let it have arbitrarily many of them encoded.
+
+The shared total-byte budget is **waited for rather than divided up**. Six
+concurrent workers each have to claim a ceiling before knowing what they
+will use, so claiming whatever is left would let four temporary claims
+starve a fifth, tiny resource, and fidelity would depend on response
+timing. A worker that cannot claim a full ceiling waits for one to come
+back, which makes the rule exact: a resource is refused for the total only
+when the bytes already retained plus its own would really exceed it.
+
+Crossing any bound drops that one resource, leaves the markup reference
+alone, records a diagnostic, and lets the rest of the capture finish. What
+all of this bounds is what a capture *collects* and *retains*, not the peak
+JS heap while collecting it: chunks are concatenated at the end rather than
+read into a buffer sized from a length the page's server chose, so the
+transient peak is a small constant above the retained bound. That is the
+honest claim, and `capture-limits.ts` makes it in those terms.
+
+**Only a real reference site is a reference.** Resource discovery matches
+the small explicit list Phase 1 supports — `img[src]` and
+`link[rel~=stylesheet][href]` — and `blob:` URLs are found there and
+nowhere else. They used to be matched in *any* attribute, on the reasoning
+that a blob URL is readable nowhere but in the page; measured against a
+real Firefox, that archived the bytes behind `data-private="blob:…"`,
+`value="blob:…"`, `title="blob:…"` and `href="blob:…"`, none of which a
+browser would ever load. "Looks like a resource reference" is not "is a
+resource reference" — the same rule the `cid:` conversion follows on the
+reading side. A blob at a site Phase 1 does not yet support is simply not
+archived, which is the gap every other unsupported site already has.
+
+**A page-chosen `Content-Type` is parsed, not trusted.** `serializeMhtml`
+throws on a part whose `mimeType` is not a real RFC 2045 `token "/" token`
+— correct for the library, and fatal to the whole save if one hostile
+header reaches it. It is not even an exotic case: `new Blob([…], { type:
+'text/plain;charset=utf-8' })` is ordinary page code, and its blob
+response repeats that header verbatim. Every `Content-Type` the capture
+sees is therefore split into a media type and a charset at one boundary
+(`src/firefox/content-type.ts`) using the library's own
+`parseContentType`/`isValidMediaType`, with a fallback chosen from the
+reference site; the injected capture returns the header uninterpreted,
+because it returns data rather than archive structure. The archive
+assembly then re-checks the same rule, so a malformed value costs one
+resource and a diagnostic rather than the save.
+
+**Save is simpler than Chrome's, and needs no lifetime workaround.**
+Firefox's MV3 background is a document, so `URL.createObjectURL` is
+available there and no offscreen document is involved. A pending
+`downloads.download({ saveAs: true })` keeps the event page alive for as
+long as the native chooser is open (measured to at least 130 seconds, with
+or without `await`, with or without a `downloads.onChanged` listener), and
+its promise does not settle until the user answers. The rule that follows
+is the only real hazard: **revoke the blob URL from that promise's own
+settlement, or from `onChanged` reaching a terminal state — never on a
+timer and never "soon after calling download".** Revoking early reliably
+produces `state: "interrupted", error: "CRASH"`. A cancelled save rejects
+cleanly and creates no download entry at all.
+
+#### Capture-side security assumptions
+
+Everything under "Security assumptions" above concerns *parsing and
+viewing* an archive. Capture touches a live page with the extension's
+privileges, so it adds its own:
+
+- **MAIN-world output is untrusted input**, exactly like archive bytes.
+  Nothing privileged crosses into that world, and what comes back is
+  narrowed before it is read.
+- **The host permission exists to perform a capture, and for nothing
+  else.** No background listener touches page content outside a save.
+- **Capture must not become a general-purpose privileged fetcher.**
+  Network acquisition is restricted to resources the page itself
+  referenced, and a URL harvested from the page is validated before it is
+  fetched (no `file:`, no `moz-extension:`, no `javascript:`). "The
+  capture path makes no network request other than acquiring the
+  resources the page itself referenced" is an invariant, not an
+  implementation detail.
+- **Reading a cross-origin-tainted canvas is a genuine privileged
+  information flow** — the isolated world can read pixels the page cannot.
+  It is acceptable only under the invariant below, and it is gated by the
+  platform rather than by ArchiveBridge: measured in a real Firefox, the
+  read succeeds **while, and only while, the extension holds `<all_urls>`**.
+  Per-origin host permission for the origin that tainted the canvas is not
+  enough — the background can fetch that origin's bytes directly and
+  `toDataURL` still answers `SecurityError` — and the check happens where
+  the pixels are read, not where they were drawn, so revoking the grant
+  from `about:addons` between the two takes the read away. The capability
+  is therefore exactly coextensive with the one broad, explicit, revocable
+  grant the extension asks for, which is also the grant that lets the
+  background fetch any origin's bytes anyway. Nothing here tries to decide
+  *which* origins contributed to a canvas: Firefox exposes no such
+  provenance, so the conservative reading — the whole canvas is as
+  sensitive as its most sensitive contributor — is the only honest one, and
+  the platform's own all-or-nothing gate is what implements it. Without the
+  grant the `SecurityError` degrades like any other unreadable canvas: the
+  `<canvas>` survives as ordinary markup, a diagnostic records it, and the
+  save succeeds.
+- **Captured bytes go to the user's disk and nowhere else.**
+- **Credentialed re-fetch is narrowly scoped, and a redirect does not
+  widen the scope.** `credentials: 'include'` sends the user's cookies and
+  is necessary for logged-in pages; it is scoped to the page's own origin
+  (stricter than same-site, and needing no public-suffix list). The scope
+  is a property of the URL the policy was evaluated for, so a request that
+  redirects must not carry it onward: measured in Firefox 152, a
+  same-origin URL answering `302` to another origin made `redirect:
+  'follow'` deliver **the redirect target's own cookies to the target**,
+  which would let any page have a user's cookies for an unrelated site
+  sent to it by referencing one same-origin URL. A credentialed request
+  therefore uses `redirect: 'manual'` and, if it redirected, is re-run
+  from the original URL with no credentials at all — see "Redirects and
+  credentials" above.
+- **One save collects a bounded amount.** Every dimension a page controls
+  — resource count, blob count, response size, blob size, canvas snapshot
+  *attempts*, canvas area — is bounded
+  (`src/firefox/capture-limits.ts`); bodies on both sides of the world
+  boundary are read against the bound rather than measured by a
+  `Content-Length` the page's server chose or a `Blob` the page minted; the
+  shared total is waited for rather than divided up, so one worker's
+  temporary claim can never drop another worker's resource; and crossing a
+  bound drops one resource with a diagnostic instead of failing the save.
+  A response the capture will *not* read — a non-ok one — is cancelled
+  rather than merely dropped, because it never reaches the bounded reader
+  and an unread `fetch` body is not a body that stops arriving: measured in
+  Firefox, leaving a `500` unread still pulled its whole 64 MB off the
+  wire, where cancelling ended the transfer after 2 MB.
+- **A resource is acquired only from a site that actually loads one.**
+  Discovery matches reference *sites* (`img[src]`,
+  `link[rel~=stylesheet][href]`), never values that merely look like
+  references: an attribute holding a `blob:`-shaped string is page data,
+  and reading it would archive bytes no browser would ever have fetched.
+  This is the capture-side form of the rule the `cid:` converter follows.
+- **A URL, media type or charset the capture writes into a MIME header
+  goes through the serializer's existing representability rules**, never
+  straight from page-controlled data into a header value.
 
 ### Why the MV3 save path needs an offscreen document
 
@@ -1445,9 +1782,20 @@ and `offscreen` do not exist in Firefox, so this manifest could not load
 there even with a `browser_specific_settings.gecko` block (the placeholder
 scaffold carried one, because Firefox needs an explicit ID to load an
 unsigned extension in development; it has been removed as misleading).
-Firefox and Safari will each get their own manifest when their capture and
-save adapters land — a per-browser manifest is a normal shape for a
+Firefox and Safari each get their own manifest when their capture and save
+adapters land — a per-browser manifest is a normal shape for a
 cross-browser extension and does not narrow the four-browser commitment.
+`manifest.firefox.json` exists today and builds to `dist-firefox/`
+alongside Chrome's `dist/`; it declares the capture's permission shape
+(`scripting`, `downloads`, `menus`, `activeTab`, plus
+`optional_host_permissions: ["<all_urls>"]`) and nothing beyond it.
+`build.mjs` selects the manifest and the output directory — a file copy
+and an entry-point list, not a framework. One difference between the two
+manifests' `content_security_policy` is load-bearing rather than
+incidental: Firefox's adds `connect-src http: https:`, because on that
+browser the resource fetch runs in the background *document*, whose
+requests the extension-pages CSP governs, and `default-src 'none'` would
+otherwise block every capture's subresources.
 
 ## Archive viewer
 
@@ -1934,6 +2282,17 @@ neither `open` nor `closed` is left alone. This is a *deliberate widening*
 of what renders, which is why it belongs to the viewer's policy rather
 than to the parser.
 
+**ArchiveBridge-authored capture writes the standard attribute, and this
+section is about Blink's output specifically.** Firefox's
+`Element.getHTML({ serializableShadowRoots, shadowRoots })` emits
+`<template shadowrootmode>`, so MHTML produced by ArchiveBridge's own
+Firefox capture needs no normalization at all — and the rule above that
+the viewer "does not touch a template that already declares the standard
+attribute" is what makes those two producers coexist in one viewer. That
+is intentional, not incidental: the normalization is a compatibility shim
+for one producer, and it must never grow into a rewrite that assumes every
+archive came from Blink.
+
 ### Viewer resource lifetime
 
 Every URL minted for one archive load belongs to one registry, and a
@@ -2060,13 +2419,26 @@ simply opening a saved page.
 ### Per-browser viewer reach, for later
 
 - **Chrome/Edge:** done, as described above.
-- **Firefox:** viewing is possible, automatic interception is not. Neither
-  `webRequest` nor `declarativeNetRequest` sees `file://` navigations, so
-  a double-click cannot be turned into an ArchiveBridge viewer; the
-  realistic flow is an extra click from the plain-text page a content
-  script *can* run on. Everything downstream of "here are the bytes" —
-  `renderMhtml`, the resource graph, the rewrite, the sandbox and CSP
-  constants — is reused unchanged.
+- **Firefox:** viewing is possible; `file://` is not the way in, in either
+  direction. Neither `webRequest` nor `declarativeNetRequest` sees a
+  `file://` navigation, so a double-click cannot be turned into an
+  ArchiveBridge viewer — and, more strongly, the extension cannot even
+  *initiate* one: `tabs.create`/`tabs.update` on a `file:` URL fail with
+  `Illegal URL`, a background `fetch` of one is a `NetworkError`, and
+  `extension.isAllowedFileSchemeAccess()` reports `false` even with
+  `file:///*` declared. A content script on a `file://` page the user
+  opened themselves *can* read it, but that route does not exist for
+  `.webarchive` at all, because Firefox downloads those rather than
+  rendering them, so there is no document to inject into.
+  **The intended Firefox viewer is therefore a file picker and
+  drag-and-drop**, which hand an extension page a real `File` with no
+  permission and no `file://` involvement, and which work for both
+  formats. There is no version of this where a double-click opens the
+  ArchiveBridge viewer on Firefox, and the README's capability table
+  should say so rather than leave it as a surprise. Everything downstream
+  of "here are the bytes" — `renderMhtml`, the resource graph, the
+  rewrite, the sandbox and CSP constants — is reused unchanged; only
+  `core/viewer-source.ts` grows a second source kind for a picked file.
 - **Safari:** not reachable from the extension at all — `file://` is
   unsupported for Safari Web Extensions, so reading local archives needs
   the containing app and native messaging. Safari also renders
@@ -2144,7 +2516,10 @@ order of scope:
    semantics") while WebKit's does not — so a hand-built one is both the
    only way to test the threat and the more realistic shape of a real
    `.webarchive`. Chrome/Chromium only today; see "Browser automation"
-   below.
+   below. A second, Firefox lane exists alongside it (WebDriver BiDi, no
+   Playwright — see "Browser automation" below), driving the production
+   top-document capture against a deterministic local fixture and
+   asserting on the archive it produces.
 7. **Real-world compatibility corpus** *(planned)* — periodic snapshots of
    real sites, run as an opt-in smoke test, never a required CI gate (no
    external network access in normal CI).
@@ -2216,12 +2591,49 @@ fidelity regression.
 - **Chrome/Chromium** — done: fully automated extension loading, MV3
   service-worker testing, and local-file navigation into the archive
   viewer, headless.
-- **Firefox** *(planned)* — temporary extension installation via
-  `web-ext`, then browser automation against the running Firefox. The
-  interesting tests there are of the custom capture implementation, since
-  Firefox has no native MHTML capture: form state, `<canvas>`,
-  cross-origin frames and stylesheets are all reachable from a content
-  script and all need their own assertions.
+- **Firefox** — **WebDriver BiDi, not Playwright, and no new dependency.**
+  Playwright cannot load a Firefox extension at all (extensions work only
+  in Chromium, and only with a persistent context), so the Firefox lane
+  needs its own runner. Firefox's own remote agent is that runner: launch
+  it with `--remote-debugging-port --profile --headless`, connect Node's
+  global `WebSocket` to `ws://127.0.0.1:<port>/session` (the `/session`
+  path is required — the bare URL Firefox prints in its log line fails the
+  WebSocket upgrade), `session.new`, then
+  `webExtension.install({ extensionData: { type: 'path', path } })` on the
+  unpacked, unsigned build directory, and `webExtension.uninstall` to tear
+  down. One harness-specific trick makes the extension addressable: BiDi
+  does not expose an extension's background realm, so the per-profile UUID
+  is pinned with an `extensions.webextensions.uuids` pref in the test
+  profile and the test drives `moz-extension://<uuid>/…` pages instead —
+  the same shape as the Chrome lane, which drives the popup rather than
+  the worker. That pref lives in the profile, not in `src/`, so
+  CONTRIBUTING's "never add a branch to `src/` for a test's benefit"
+  holds. `web-ext` remains useful for interactive development and is
+  deliberately not a CI requirement.
+
+  **Two measured facts bound what this lane can observe, and both are
+  permanent.** A `saveAs: true` download with the native chooser open
+  leaves the `downloads.download` promise pending *and* reports zero items
+  from `downloads.search({})`, so there is no Firefox equivalent of the
+  Chrome lane's "assert on the bytes that reached disk" — and the answer
+  is not to weaken `saveAs` in `src/`. And a permission prompt needs a
+  real input event: BiDi's `userActivation` flag does not satisfy
+  `permissions.request()`, while a synthesized pointer click through
+  `input.performActions` does. So the lane drives the capture through
+  `scripting.executeScript` from the extension's own page, runs the
+  browser-neutral half (resource acquisition, assembly, conversion)
+  directly, and asserts the save command by its observable behaviour: it
+  settles promptly when it cannot capture, and is still running when it
+  has captured and is waiting on the chooser. The profile pref that
+  auto-answers the optional-permission doorhanger lives in the throwaway
+  profile, like the pinned UUID, never in `src/`.
+
+  Still to come, with the phases they belong to: cross-origin frames,
+  constructed stylesheets, and a Chrome-vs-Firefox differential lane —
+  which would need an explicit allowance list (`<script>`, `srcset`,
+  shadow-root attribute spelling, `Content-ID` values, transfer encodings
+  and serialized HTML bytes all differ legitimately) to be anything but a
+  false-failure generator.
 - **Safari** *(planned, macOS-only)* — needs full Xcode, a containing app
   and a signed Safari Web Extension, so it gets its own macOS lane.
   Safari automation is explicitly **not** a blocker for Chrome work.

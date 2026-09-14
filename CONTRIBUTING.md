@@ -57,10 +57,13 @@ floor never stops being the tested floor.
   plist output must go through that boundary too.
 - `parse5` is used to locate `<iframe>`/`<frame>` `src` attributes,
   effective `<base href>`, and declarative Shadow DOM frame traversal
-  when flattening/reconstructing frames during WebArchive ⇄ MHTML
-  conversion (`mhtml/html-rewrite.ts`) — and, for the archive viewer, to
-  locate *every* attribute and `<style>` body it has to rewrite
-  (`view/html-sites.ts`). It's used purely to find exact
+  when flattening frames during WebArchive → MHTML conversion
+  (`mhtml/html-rewrite.ts`) — and, for the archive viewer *and* the
+  MHTML → WebArchive `cid:` rewrite, to locate *every* attribute and
+  `<style>` body they have to rewrite (`view/html-sites.ts`, shared by
+  `view/render.ts` and `convert/cid-references.ts` so that "which
+  attributes can name a resource" exists in exactly one place). It's used
+  purely to find exact
   source-string offsets (`sourceCodeLocationInfo`), never to re-serialize
   the document — only the located attribute span is spliced, so nothing
   else about the HTML changes. A hand-rolled scanner would need to
@@ -72,7 +75,8 @@ floor never stops being the tested floor.
   (`entities`). See docs/architecture.md, "Frame representation" for the
   full evaluation.
 - **No CSS parser**, and that is a decision rather than an omission. The
-  viewer rewrites `url()` and `@import` inside archived stylesheets with a
+  viewer (and the converter's `cid:` rewrite) rewrites `url()` and
+  `@import` inside archived stylesheets with a
   small hand-written scanner (`view/css-rewrite.ts`) over CSS Syntax Level
   3's relevant tokenizer states: comments, strings, url tokens, and ident
   sequences. That last one is not optional — identifiers may be written
@@ -133,7 +137,7 @@ floor never stops being the tested floor.
   `iconv-lite` to a stub instead was rejected — it would silently change
   what the library does with a non-UTF-8 resource. Both go away if
   `iconv-lite` does.
-- `playwright` (devDependency of `apps/extension`) drives the extension
+- `playwright` (devDependency of `apps/extension`) drives the **Chrome**
   E2E suite. Note the package: `playwright`, **not**
   `@playwright/test` — the runner stays `node:test` (see Testing
   philosophy). Its cost is two packages
@@ -141,6 +145,14 @@ floor never stops being the tested floor.
   of browser-launch, target-discovery and worker-attach code a
   home-grown CDP harness would need us to maintain. See
   docs/architecture.md, "Browser automation".
+- **The Firefox E2E suite adds no dependency at all**, and that is a
+  deliberate result rather than a happy accident: Playwright cannot load a
+  Firefox extension, so the alternatives were `web-ext`/`selenium` or
+  Firefox's own remote agent. The remote agent speaks WebDriver BiDi over
+  a WebSocket, Node has had a global `WebSocket` since 22, and the
+  protocol surface the lane needs is six commands — see
+  `e2e/firefox/bidi-session.ts`. `web-ext` stays useful for interactive
+  development and must not become a CI requirement.
 - `adm-zip` (devDependency of the repo root only, never of a workspace) packages
   the built extension into the Chrome ZIP release artifact
   (`scripts/package-extension.mjs`). It both writes and reads ZIPs, so the
@@ -152,13 +164,14 @@ floor never stops being the tested floor.
   `@biomejs/biome`. Don't add ESLint, Prettier, Vitest/Jest/Mocha,
   tsx/ts-node, or a CLI argument-parser library without discussing it
   first — these were explicitly excluded from the initial design.
-- `@types/chrome` was **not** added. `apps/extension` hand-writes
-  ambient declarations for exactly the `chrome.*` members it calls
-  (`src/chrome/chrome-api.d.ts`), so that file doubles as the reviewable
-  list of platform APIs the extension depends on. The risk of
-  hand-written types drifting from the runtime is covered by exercising
-  every one of them against a real Chromium in `e2e/`. If that surface
-  ever grows past a page or two, reconsider.
+- `@types/chrome` and `@types/firefox-webext-browser` were **not** added.
+  `apps/extension` hand-writes ambient declarations for exactly the
+  `chrome.*`/`browser.*` members it calls
+  (`src/chrome/chrome-api.d.ts`, `src/firefox/firefox-api.d.ts`), so those
+  files double as the reviewable list of platform APIs the extension
+  depends on. The risk of hand-written types drifting from the runtime is
+  covered by exercising every one of them against a real browser in
+  `e2e/`. If either surface ever grows past a page or two, reconsider.
 
 ## TypeScript conventions
 
@@ -223,12 +236,21 @@ Run from the repo root:
 - `npm run build` — build all workspaces
 - `npm run typecheck` — typecheck all workspaces
 - `npm test` — run all workspace tests (`node --test`)
-- `npm run lint` — Biome check (format, lint, and import-sorting diagnostics; no writes)
+- `npm run lint` — Biome check (format, lint, and import-sorting diagnostics; no writes).
+  `biome.json`'s `files.includes` excludes four paths, and they are four
+  rather than a blanket rule on purpose: `**/dist` and `**/dist-firefox`
+  are build output, `artifacts/` is generated release packaging, and
+  `docs/research/` is intentionally local, git-excluded research. The last
+  two exist in a normal working copy and not in CI, so without those two
+  entries `npm run check` is green on CI and red on the machine that has
+  to pass it. Nothing tracked is excluded, and nothing should be added
+  here that is.
 - `npm run format` — Biome check --write (applies formatting, import sorting, and safe lint fixes)
 - `npm run check:filenames` — verifies file/directory naming policy (see File and directory naming)
 - `npm run check:versions` — verifies the locked-step version contract (see Release process below)
 - `npm run check` — build + typecheck + test + lint + check:filenames + check:versions (the pre-PR gate)
-- `npm run test:e2e` — the extension's browser E2E suite (opt-in, see below)
+- `npm run test:e2e` — the extension's Chrome E2E suite (opt-in, see below)
+- `npm run test:e2e:firefox` — the extension's Firefox E2E suite (opt-in, see below)
 - `npm run package:extension` — builds the extension and packages it into
   `artifacts/archivebridge-chrome-<version>.zip` (see Release process below)
 
@@ -244,9 +266,14 @@ so either can be run standalone.
 ## Extension E2E tests
 
 `apps/extension/e2e/` loads the **real built extension** into a real
-Chromium. It has two lanes. The **save** lane captures a deterministic
-local page, saves it in both formats, and verifies the resulting bytes
-with `@xarsh/archivebridge` itself. The **view** lane writes a real
+browser. There are two suites, one per browser, and they are separate
+scripts and separate CI jobs because they need different binaries.
+
+### Chrome (`e2e/*.test.ts`, Playwright)
+
+Two lanes. The **save** lane captures a deterministic local page, saves it
+in both formats, and verifies the resulting bytes with
+`@xarsh/archivebridge` itself. The **view** lane writes a real
 `.webarchive` to disk, navigates the browser to its `file://` URL, and
 asserts against the archived DOM Chrome laid out after the extension's own
 `declarativeNetRequest` rule redirected it — including that a hostile
@@ -260,8 +287,61 @@ npm run build
 npm run test:e2e
 ```
 
-It is **not** part of `npm run check`, because it needs a browser binary
-that the unit-test gate must not require. It has its own CI job instead.
+### Firefox (`e2e/firefox/*.test.ts`, WebDriver BiDi)
+
+Playwright cannot load a Firefox extension — extensions work only in
+Chromium, and only with a persistent context — so this lane uses Firefox's
+own remote agent over WebDriver BiDi, driven from Node's global
+`WebSocket`. **No new dependency, and deliberately not `web-ext`:**
+`web-ext` is a fine tool for interactive development (`web-ext run`
+against a live profile) and is not required to run these tests.
+
+The suite launches headless Firefox with a throwaway profile, installs
+`dist-firefox/` with `webExtension.install`, and drives the extension
+through its own pages at a `moz-extension://<uuid>/` address pinned by an
+`extensions.webextensions.uuids` pref in that profile (BiDi does not
+expose an extension's background realm, so there is no Firefox equivalent
+of evaluating inside the service worker). The pref lives in the test
+profile, never in `src/`.
+
+Two more things about this lane are forced by measured Firefox behavior
+rather than chosen, and both are worth knowing before adding a test:
+
+- **A `saveAs: true` download cannot complete here, and must not be made
+  to.** With the native chooser open the `downloads.download` promise
+  stays pending and `downloads.search({})` reports *zero* items, so the
+  saved bytes are unreadable from the lane. Playwright's replacement of
+  Chrome's download pipeline has no Firefox equivalent. The capture and
+  conversion path is therefore asserted at the nearest observable browser
+  API boundary (`scripting.executeScript` from an extension page, then the
+  browser-neutral modules), and the save command is asserted by what it
+  *does*: settle promptly when it cannot capture, and still be running
+  when it has captured and is waiting on the chooser. Never weaken
+  `saveAs: true` in `src/` to get a file on disk.
+- **A permission prompt needs a real input event.** BiDi's own
+  `userActivation: true` flag does not satisfy
+  `browser.permissions.request()`; a synthesized pointer click through
+  `input.performActions` does. The doorhanger it would raise is native UI,
+  so the test profile sets
+  `extensions.webextOptionalPermissionPrompts=false` to answer it — which
+  changes who answers the prompt, not whether production asks. The
+  gesture, the call site and its ordering are all the real ones.
+
+```sh
+npm run build
+npm run test:e2e:firefox          # uses `firefox` from PATH
+FIREFOX_BIN=/path/to/firefox npm run test:e2e:firefox
+```
+
+Firefox is taken from the machine rather than pinned or downloaded, the
+same way the Chrome lane uses whatever `npx playwright install chromium`
+fetched. The floor that *is* enforced is `manifest.firefox.json`'s
+`strict_min_version: "128.0"`, which the browser itself checks at install:
+an older Firefox refuses the extension and the suite fails loudly instead
+of quietly testing something else.
+
+Neither suite is part of `npm run check`, because both need a browser
+binary that the unit-test gate must not require. Each has its own CI job.
 
 Four rules for anything added here:
 
@@ -302,11 +382,12 @@ version:
 - root `package.json`
 - `packages/archivebridge/package.json`
 - `apps/extension/package.json`
-- `apps/extension/manifest.json`
+- `apps/extension/manifest.json` (Chrome/Edge)
+- `apps/extension/manifest.firefox.json`
 
 `npm run check:versions` (`scripts/check-versions.mjs`) enforces this and is
 part of `npm run check`, so drift is caught on every push/PR, not only at
-release time. Bump all four together; there is no bump-automation tooling
+release time. Bump all five together; there is no bump-automation tooling
 (no Changesets/Lerna/release-please) — this is intentionally simple.
 
 The release tag convention is `v<version>` (e.g. `v0.1.0`), matched against
@@ -350,7 +431,10 @@ it lands. See [fixtures/README.md](fixtures/README.md).
   point should be usable without assuming a Node.js runtime, even though
   the CLI (which does depend on Node) lives in the same package.
 - **`apps/extension` must not reimplement archive parsing, conversion,
-  format detection or archive-content rewriting.** It consumes
+  format detection or archive-content rewriting** — including on the
+  capture side: an ArchiveBridge-authored capture (Firefox, later Safari)
+  assembles an `MhtmlDocument` and hands it to the library's serializer
+  rather than writing MIME by hand. It consumes
   `@xarsh/archivebridge`. Its save path's archive logic is one module,
   `src/core/archive-bytes.ts`, and its viewer's is one call to
   `renderMhtml`; both jobs are to call the library, not to know anything
@@ -362,8 +446,13 @@ it lands. See [fixtures/README.md](fixtures/README.md).
   is what keeps the later Firefox and Safari viewers a different loader
   rather than a second implementation.
 - **`apps/extension/src/core/` stays free of browser APIs.** No
-  `chrome.*`, no DOM, no `navigator`. Per-browser platform code lives in
-  `src/chrome/` (and, later, `src/firefox/`, `src/safari/`). This is
+  `chrome.*`, no `browser.*`, no DOM, no `navigator`. Per-browser platform
+  code lives in `src/chrome/` and `src/firefox/` (and, later,
+  `src/safari/`), which are deliberately parallel rather than shared: the
+  two differ in service-worker-vs-event-page lifetime, `contextMenus` vs
+  `menus`, and whether an offscreen document exists, and an abstraction
+  over those would hide exactly the differences that matter. A little
+  duplicated platform glue is the intended cost. This is
   enforced by the type checking split: `core/` is the only source
   directory that compiles under both the browser tsconfig and the Node
   one, and it is what lets the whole byte-generation path be tested

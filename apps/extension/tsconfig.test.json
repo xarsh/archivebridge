@@ -6,5 +6,5 @@
 		"types": ["node"],
 		"lib": ["esnext", "dom", "dom.iterable"]
 	},
-	"include": ["src/**/*.test.ts", "src/chrome/chrome-api.d.ts", "e2e/**/*"]
+	"include": ["src/**/*.test.ts", "src/chrome/chrome-api.d.ts", "src/firefox/firefox-api.d.ts", "e2e/**/*"]
 }

@@ -138,10 +138,13 @@ change the WebArchive contents.
   that four-browser commitment is an architectural constraint, not a
   wish — see
   [docs/architecture.md](docs/architecture.md#browser-extension-capture-and-save-are-separate-per-browser-concerns).
-  Viewing has its own per-browser catch: Firefox cannot intercept a local
-  archive automatically at all (neither `webRequest` nor
-  `declarativeNetRequest` sees `file://` navigations), so viewing there
-  will take an explicit click rather than a double-click.
+  Viewing has its own per-browser catch: **on Firefox, double-clicking a
+  saved archive will not open it in ArchiveBridge, and cannot be made to.**
+  A Firefox extension can neither intercept a `file://` navigation (neither
+  `webRequest` nor `declarativeNetRequest` sees one) nor start one
+  (`tabs.create` on a `file:` URL fails outright), so the Firefox viewer
+  will be a file picker and drag-and-drop instead — which, unlike the
+  Chrome route, needs no permissions and works for both formats.
 
 ArchiveBridge deliberately does **not** try to add formats to the
 browser's own Save As dialog (no browser exposes a hook for it) or

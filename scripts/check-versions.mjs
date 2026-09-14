@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Enforces locked-step versioning: root, the library package, the extension
-// package, and the extension manifest must all report the same version.
+// package, and every per-browser extension manifest must all report the
+// same version.
 // ArchiveBridge is deliberately one product with one version, not
 // independently versioned components — see CONTRIBUTING.md, "Locked-step
 // versioning".
@@ -16,6 +17,7 @@ const SOURCES = [
 	{ file: 'packages/archivebridge/package.json', path: join(root, 'packages/archivebridge/package.json') },
 	{ file: 'apps/extension/package.json', path: join(root, 'apps/extension/package.json') },
 	{ file: 'apps/extension/manifest.json', path: join(root, 'apps/extension/manifest.json') },
+	{ file: 'apps/extension/manifest.firefox.json', path: join(root, 'apps/extension/manifest.firefox.json') },
 ]
 
 function readVersion({ file, path }) {
