@@ -43,7 +43,7 @@ import { PAGE_CAPTURE_LIMITS, RESOURCE_FETCH_LIMITS } from './capture-limits.ts'
 import { buildMhtmlDocument } from './mhtml-document.ts'
 import type { CapturedBlob, CapturedCanvas, NetworkResourceReference, PageCaptureNote, PageCaptureResult } from './page-capture.ts'
 import { capturePageState, PAGE_CAPTURE_NOTE_KINDS } from './page-capture.ts'
-import { acquireResources } from './resources.ts'
+import { acquireResources, credentialScopeForDocumentUrl } from './resources.ts'
 
 /** Thrown when the page could not be reached at all, as opposed to a capture that merely lost some resources. */
 export class CaptureFailedError extends Error {
@@ -203,7 +203,18 @@ export async function captureMhtml(tabId: number): Promise<Uint8Array> {
 	}
 
 	const capture = asPageCaptureResult(injection.result)
-	const acquired = await acquireResources(capture.networkResources, capture.url, RESOURCE_FETCH_LIMITS)
+	// Every reference in this phase comes from the one top document, so they
+	// all carry that document's scope — attached here rather than assumed by
+	// `resources.ts`, which is what makes the credential rule per-reference
+	// before there is a second document to get it wrong for. `capture.url` is
+	// a navigated top document's URL, the case where the URL does decide the
+	// origin; an inherited-origin frame will have to say what its scope is
+	// instead of being re-parsed into one.
+	const topDocumentScope = credentialScopeForDocumentUrl(capture.url)
+	const acquired = await acquireResources(
+		capture.networkResources.map((reference) => ({ ...reference, credentialScope: topDocumentScope })),
+		RESOURCE_FETCH_LIMITS,
+	)
 	const built = buildMhtmlDocument(capture, acquired.resources, canvasContentIdPrefix)
 
 	for (const diagnostic of [...acquired.diagnostics, ...built.diagnostics]) {

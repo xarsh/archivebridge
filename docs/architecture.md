@@ -1436,8 +1436,19 @@ own native MHTML viewer.
 
 **Redirects and credentials.** Resource acquisition runs in the
 background, where `fetch` is privileged, and decides per URL whether the
-user's cookies may go with it: the page's own origin yes, everything else
-no. That decision is made about *one URL*, and `redirect: 'follow'` does
+user's cookies may go with it: the origin of the document that made the
+reference yes, everything else no. The scope is carried by each reference
+rather than by the capture, because "the page's origin" stops being one
+thing as soon as a capture spans frames — a reference made by a child
+document on origin B must be same-origin to *B*, and must not reach an
+origin-A resource with the user's A session attached merely because A is
+the top document. Phase 1 has one document and so one scope, but the rule
+is stated per reference so that frame capture cannot inherit the wrong
+one. A document's origin is not always its URL's origin either (`srcdoc`
+and `about:blank` inherit; a sandboxed frame's is opaque), so the scope is
+supplied by the layer that captured the document rather than re-derived
+from a URL inside the fetching code. That decision is made about *one
+URL*, and `redirect: 'follow'` does
 not respect it. Measured, in a real Firefox, from an extension page
 holding `<all_urls>`: a same-origin URL answering `302` to a second origin
 had the **second origin's cookies** sent to it. A page needs only one
@@ -1585,8 +1596,11 @@ privileges, so it adds its own:
 - **Captured bytes go to the user's disk and nowhere else.**
 - **Credentialed re-fetch is narrowly scoped, and a redirect does not
   widen the scope.** `credentials: 'include'` sends the user's cookies and
-  is necessary for logged-in pages; it is scoped to the page's own origin
-  (stricter than same-site, and needing no public-suffix list). The scope
+  is necessary for logged-in pages; it is scoped to the origin of the
+  document that made the reference (stricter than same-site, and needing
+  no public-suffix list) — per reference, not per capture, so that a
+  capture spanning frames cannot evaluate one document's references
+  against another document's origin. The scope
   is a property of the URL the policy was evaluated for, so a request that
   redirects must not carry it onward: measured in Firefox 152, a
   same-origin URL answering `302` to another origin made `redirect:

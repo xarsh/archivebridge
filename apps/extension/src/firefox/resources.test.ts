@@ -15,19 +15,51 @@
  * cookie jar, so `credentials: 'include'` is inert here and no assertion
  * below can observe a cookie. What it *can* observe is the request shape
  * that makes the leak impossible: which requests are made, in which order,
- * and that the credentialed one never reaches a redirect's target. The
- * cookies themselves are asserted in a real Firefox, against a real jar, by
- * `e2e/firefox/phase-1.test.ts` — which injects the very function under test
- * here.
+ * and that the credentialed one never reaches a redirect's target. That
+ * shape is also what makes the *scope* observable — a credentialed request
+ * is the one that stops at a redirect rather than following it, so "which
+ * document's origin was this reference measured against" is answerable from
+ * the server's own log. The cookies themselves are asserted in a real
+ * Firefox, against a real jar, by `e2e/firefox/phase-1.test.ts` — which
+ * injects the very function under test here.
  */
 
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
-import { acquireResources, classifyResourceUrl, fetchResourceWithoutCredentialLeak, type ResourceFetchLimits } from './resources.ts'
+import type { NetworkResourceReference } from './page-capture.ts'
+import {
+	acquireResources,
+	classifyResourceUrl,
+	credentialScopeForDocumentUrl,
+	fetchResourceWithoutCredentialLeak,
+	type ResourceAcquisitionResult,
+	type ResourceFetchLimits,
+} from './resources.ts'
 
 const PAGE = 'https://example.invalid/page'
+
+/** The scope every reference in a one-document capture carries — Phase 1's whole world, and the default for the tests that are about something else. */
+const PAGE_SCOPE = credentialScopeForDocumentUrl(PAGE)
+
+/**
+ * `capture.ts`'s Phase 1 call, as a helper: one document, so one scope,
+ * attached to every reference it made.
+ *
+ * The tests below that are *not* about the credential boundary keep calling
+ * it, which is deliberate — they assert budget, bounds and cancellation
+ * behaviour, and the scope is noise to them. The ones that *are* about the
+ * boundary call `acquireResources` directly, with a scope per reference,
+ * because that is the distinction a single page URL could not make.
+ */
+function acquireFromDocument(references: readonly NetworkResourceReference[], documentUrl: string, limits: ResourceFetchLimits): Promise<ResourceAcquisitionResult> {
+	const credentialScope = credentialScopeForDocumentUrl(documentUrl)
+	return acquireResources(
+		references.map((reference) => ({ ...reference, credentialScope })),
+		limits,
+	)
+}
 
 /** Generous enough not to interfere with a test that is about something else. */
 const NO_LIMIT: ResourceFetchLimits = { maxResourceBytes: 8 * 1024 * 1024, maxTotalBytes: 32 * 1024 * 1024 }
@@ -253,25 +285,80 @@ test('only http(s) is ever requested, whatever the page put in the attribute', (
 		'ws://example.invalid/socket',
 		'not a url at all',
 	]) {
-		assert.equal(classifyResourceUrl(url, PAGE), undefined, `${url} must not be fetchable`)
+		assert.equal(classifyResourceUrl(url, PAGE_SCOPE), undefined, `${url} must not be fetchable`)
 	}
-	assert.deepEqual(classifyResourceUrl('https://example.invalid/a.png', PAGE), { url: 'https://example.invalid/a.png', credentials: 'include' })
-	assert.deepEqual(classifyResourceUrl('http://example.invalid/a.png', PAGE), { url: 'http://example.invalid/a.png', credentials: 'omit' })
+	assert.deepEqual(classifyResourceUrl('https://example.invalid/a.png', PAGE_SCOPE), { url: 'https://example.invalid/a.png', credentials: 'include' })
+	assert.deepEqual(classifyResourceUrl('http://example.invalid/a.png', PAGE_SCOPE), { url: 'http://example.invalid/a.png', credentials: 'omit' })
 })
 
 test('credentials go to the page’s own origin and nowhere else', () => {
-	assert.equal(classifyResourceUrl('https://example.invalid/deep/path?q=1', PAGE)?.credentials, 'include')
+	assert.equal(classifyResourceUrl('https://example.invalid/deep/path?q=1', PAGE_SCOPE)?.credentials, 'include')
 	// A different host, a different scheme and a different port are each a
 	// different origin, and each must lose the cookies.
-	assert.equal(classifyResourceUrl('https://cdn.example.invalid/a.png', PAGE)?.credentials, 'omit')
-	assert.equal(classifyResourceUrl('http://example.invalid/a.png', PAGE)?.credentials, 'omit')
-	assert.equal(classifyResourceUrl('https://example.invalid:8443/a.png', PAGE)?.credentials, 'omit')
+	assert.equal(classifyResourceUrl('https://cdn.example.invalid/a.png', PAGE_SCOPE)?.credentials, 'omit')
+	assert.equal(classifyResourceUrl('http://example.invalid/a.png', PAGE_SCOPE)?.credentials, 'omit')
+	assert.equal(classifyResourceUrl('https://example.invalid:8443/a.png', PAGE_SCOPE)?.credentials, 'omit')
+})
+
+test('a reference is same-origin to the document that made it, not to the capture’s top document', () => {
+	// The Phase 2 shape, in the one form a unit test can hold: a top document
+	// on origin A, and a reference that originated in a child document on
+	// origin B.
+	const topDocumentA = credentialScopeForDocumentUrl('https://a.invalid/page')
+	const childDocumentB = credentialScopeForDocumentUrl('https://b.invalid/frame')
+
+	// 1. B references a B resource: same-origin *to B*, so it may carry B's
+	//    cookies — which the old one-page-url rule refused, because it only
+	//    ever asked whether the target was A.
+	assert.deepEqual(classifyResourceUrl('https://b.invalid/logo.png', childDocumentB), { url: 'https://b.invalid/logo.png', credentials: 'include' })
+
+	// 2. B references an A resource: cross-origin *to B*. This is the one
+	//    that matters. Under the old rule the target's origin matched the
+	//    page URL's and the request went out with `include`, handing a
+	//    document on B the user's authenticated session on A — an
+	//    authenticated cross-origin read no document on the page could have
+	//    performed for itself.
+	assert.equal(classifyResourceUrl('https://a.invalid/private.json', childDocumentB)?.credentials, 'omit')
+
+	// And the top document is unaffected by any of it: its own references are
+	// judged against its own origin, exactly as before.
+	assert.equal(classifyResourceUrl('https://a.invalid/private.json', topDocumentA)?.credentials, 'include')
+	assert.equal(classifyResourceUrl('https://b.invalid/logo.png', topDocumentA)?.credentials, 'omit')
+})
+
+test('a scope derived from a document URL is that URL’s origin, port and scheme included', () => {
+	assert.deepEqual(credentialScopeForDocumentUrl('https://example.invalid/page?q=1#x'), { kind: 'origin', origin: 'https://example.invalid' })
+	assert.deepEqual(credentialScopeForDocumentUrl('https://example.invalid:8443/page'), { kind: 'origin', origin: 'https://example.invalid:8443' })
+	assert.deepEqual(credentialScopeForDocumentUrl('http://example.invalid/page'), { kind: 'origin', origin: 'http://example.invalid' })
+})
+
+test('a scope with no origin to name spends nobody’s credentials, and is not same-origin with another one', () => {
+	// A URL that names no tuple origin. `URL.origin` renders each of these as
+	// the *string* `"null"`, which is exactly the trap: comparing origins as
+	// strings would make all of them same-origin with each other, and a
+	// document whose URL merely failed to parse same-origin with a real site
+	// called `null`.
+	for (const documentUrl of ['about:blank', 'about:srcdoc', 'data:text/html,<b>', 'not a url at all']) {
+		const scope = credentialScopeForDocumentUrl(documentUrl)
+		assert.deepEqual(scope, { kind: 'opaque' }, documentUrl)
+		// Still fetchable — the references are ordinary http(s) URLs the
+		// document named — but never with credentials.
+		assert.deepEqual(classifyResourceUrl('https://example.invalid/a.png', scope), { url: 'https://example.invalid/a.png', credentials: 'omit' })
+		assert.equal(classifyResourceUrl('file:///etc/passwd', scope), undefined)
+	}
+
+	// Two opaque scopes are not each other's origin. This is a property of
+	// the representation rather than a claim about any browser: what a
+	// `srcdoc` or `about:blank` frame's *effective* origin is (it inherits
+	// its parent's) is not something this module infers, and Phase 2 must
+	// state it rather than arrive here with a URL.
+	assert.notDeepEqual(classifyResourceUrl('https://example.invalid/a.png', credentialScopeForDocumentUrl('about:blank'))?.credentials, 'include')
 })
 
 test('acquireResources fetches what it can and reports what it cannot, without failing the capture', async (t) => {
 	const { origin, received } = await startFixture(t)
 
-	const result = await acquireResources(
+	const result = await acquireFromDocument(
 		[
 			{ url: `${origin}/style.css`, kind: 'stylesheet' },
 			{ url: `${origin}/untyped`, kind: 'stylesheet' },
@@ -310,7 +397,7 @@ test('acquireResources fetches what it can and reports what it cannot, without f
 
 test('a media type the serializer could not write falls back instead of reaching it', async (t) => {
 	const { origin } = await startFixture(t)
-	const result = await acquireResources([{ url: `${origin}/two-slashes`, kind: 'stylesheet' }], `${origin}/page`, NO_LIMIT)
+	const result = await acquireFromDocument([{ url: `${origin}/two-slashes`, kind: 'stylesheet' }], `${origin}/page`, NO_LIMIT)
 	// `text/css/garbage` used to come back verbatim and take the whole save
 	// down inside `serializeMhtml`.
 	assert.equal(result.resources[0]?.mimeType, 'text/css')
@@ -374,7 +461,7 @@ test('a request that does not redirect keeps its credentials and costs one reque
 
 test('a redirected resource keeps the URL the markup names, and says the credentials were withheld', async (t) => {
 	const { origin } = await startFixture(t)
-	const result = await acquireResources([{ url: `${origin}/redirect-cross`, kind: 'stylesheet' }], `${origin}/page`, NO_LIMIT)
+	const result = await acquireFromDocument([{ url: `${origin}/redirect-cross`, kind: 'stylesheet' }], `${origin}/page`, NO_LIMIT)
 
 	// The archived markup points at the URL the page referenced, so that is
 	// the part's identity. Where the redirect led is diagnostic information,
@@ -388,9 +475,48 @@ test('a redirected resource keeps the URL the markup names, and says the credent
 	assert.match(result.diagnostics[0]?.type === 'unsupported-feature' ? result.diagnostics[0].feature : '', /redirected.*without credentials/)
 })
 
+test('one capture makes two different credential decisions, each according to the document its reference came from', async (t) => {
+	const { origin, crossOrigin, received } = await startFixture(t)
+
+	// **Both targets live on `origin`.** The only thing that differs is which
+	// document referenced them — and that is precisely what one page URL for
+	// the whole capture could not express: whichever origin it named, one of
+	// the two assertions below would be wrong.
+	//
+	// The credential mode is observable here without a cookie jar, because
+	// the two modes make visibly different request shapes: a credentialed
+	// request is the one that refuses to follow a redirect and so costs two
+	// requests to the same URL, while an uncredentialed one follows in a
+	// single chain.
+	const result = await acquireResources(
+		[
+			{ url: `${origin}/redirect-cross`, kind: 'stylesheet', credentialScope: credentialScopeForDocumentUrl(`${origin}/top`) },
+			{ url: `${origin}/redirect-same`, kind: 'stylesheet', credentialScope: credentialScopeForDocumentUrl(`${crossOrigin}/frame`) },
+		],
+		NO_LIMIT,
+	)
+
+	const requestsTo = (path: string): number => received.filter((request) => request.path === path).length
+	assert.equal(requestsTo('/redirect-cross'), 2, 'a reference from its own origin should have been credentialed, and a credentialed request stops at the redirect')
+	assert.equal(
+		requestsTo('/redirect-same'),
+		1,
+		'a reference from another document’s origin should have carried no credentials, and an uncredentialed request follows the redirect in one chain',
+	)
+
+	// The same fact stated the other way round: exactly one of the two was
+	// credentialed, so exactly one had credentials to withhold at a redirect.
+	assert.deepEqual(
+		result.diagnostics.map((diagnostic) => (diagnostic.type === 'unsupported-feature' ? diagnostic.feature : diagnostic.type)),
+		[`${origin}/redirect-cross redirected, so it was re-fetched without credentials rather than sending them to wherever it redirected to`],
+	)
+	// And both resources were still acquired, under the URLs the markup names.
+	assert.deepEqual(result.resources.map((resource) => resource.url).sort(), [`${origin}/redirect-cross`, `${origin}/redirect-same`].sort())
+})
+
 test('a response larger than one resource may allocate contributes nothing, and the rest of the capture continues', async (t) => {
 	const { origin } = await startFixture(t)
-	const result = await acquireResources(
+	const result = await acquireFromDocument(
 		[
 			{ url: `${origin}/chunked-large`, kind: 'image' },
 			{ url: `${origin}/style.css`, kind: 'stylesheet' },
@@ -419,7 +545,7 @@ test('a resource is refused for the total budget only by bytes actually retained
 	// retaining nothing — which is exactly the state the tiny two must
 	// survive. Everything this capture really retains (4 x 1 KB + 2 x 11 B)
 	// is a fraction of the 256 KB it is allowed.
-	const result = await acquireResources(
+	const result = await acquireFromDocument(
 		[
 			{ url: `${origin}/held?1`, kind: 'image' },
 			{ url: `${origin}/held?2`, kind: 'image' },
@@ -456,7 +582,7 @@ test('a body the capture will not read is hung up on, not left running', { timeo
 	// body kept coming delivered 64 MB in 37 ms to a response nobody read).
 	// The interlock is the server's own hang-up event rather than a wait: if
 	// this ever stops cancelling, nothing hangs up and the test times out.
-	const result = await acquireResources([{ url: `${fixture.origin}/error-body`, kind: 'image' }], `${fixture.origin}/page`, NO_LIMIT)
+	const result = await acquireFromDocument([{ url: `${fixture.origin}/error-body`, kind: 'image' }], `${fixture.origin}/page`, NO_LIMIT)
 	await fixture.errorBodyHungUpOn
 
 	assert.ok(fixture.errorBodyBytesWritten() < ERROR_BODY_CAP, `the server sent its whole ${ERROR_BODY_CAP}-byte body, so the client took a body it had already refused`)
@@ -473,7 +599,7 @@ test('a read that throws gives its claim on the budget back, rather than strandi
 	// read if the first one's claim came back when its connection died. If it
 	// did not, this does not fail an assertion — it waits forever, which is
 	// what the timeout is for.
-	const result = await acquireResources(
+	const result = await acquireFromDocument(
 		[
 			{ url: `${origin}/abort`, kind: 'image' },
 			{ url: `${origin}/abort-follower`, kind: 'stylesheet' },
@@ -494,7 +620,7 @@ test('the capture’s total byte budget bounds many resources, not just one larg
 	const { origin } = await startFixture(t)
 	const references = Array.from({ length: 6 }, () => ({ url: `${origin}/128k`, kind: 'image' as const }))
 	// Six distinct references to the same 128 KB body, against a 300 KB total.
-	const result = await acquireResources(
+	const result = await acquireFromDocument(
 		references.map((reference, index) => ({ ...reference, url: `${reference.url}?${index}` })),
 		`${origin}/page`,
 		{ maxResourceBytes: 1024 * 1024, maxTotalBytes: 300 * 1024 },

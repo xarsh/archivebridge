@@ -46,7 +46,7 @@ import { archiveBytesFrom } from '../../src/core/archive-bytes.ts'
 import { PAGE_CAPTURE_LIMITS, RESOURCE_FETCH_LIMITS } from '../../src/firefox/capture-limits.ts'
 import { buildMhtmlDocument } from '../../src/firefox/mhtml-document.ts'
 import { capturePageState, type PageCaptureOptions, type PageCaptureResult } from '../../src/firefox/page-capture.ts'
-import { acquireResources, fetchResourceWithoutCredentialLeak } from '../../src/firefox/resources.ts'
+import { acquireResources, credentialScopeForDocumentUrl, fetchResourceWithoutCredentialLeak } from '../../src/firefox/resources.ts'
 import {
 	CANVAS_BOUNDS_PATH,
 	CANVAS_BOUNDS_PLAIN,
@@ -286,7 +286,11 @@ describe('Firefox Phase 1: top-document capture', () => {
 		const canvasContentIdPrefix = `canvas-${randomUUID()}@archivebridge`
 		capture = await fixture.capture(fixture.fixtureTabId, canvasContentIdPrefix)
 
-		const acquired = await acquireResources(capture.networkResources, capture.url, RESOURCE_FETCH_LIMITS)
+		const topDocumentScope = credentialScopeForDocumentUrl(capture.url)
+		const acquired = await acquireResources(
+			capture.networkResources.map((reference) => ({ ...reference, credentialScope: topDocumentScope })),
+			RESOURCE_FETCH_LIMITS,
+		)
 		const built = buildMhtmlDocument(capture, acquired.resources, canvasContentIdPrefix)
 		assert.deepEqual([...acquired.diagnostics, ...built.diagnostics], [], 'the deterministic fixture must capture with no diagnostics at all')
 		mhtmlBytes = serializeMhtml(built.document)

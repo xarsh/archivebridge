@@ -40,6 +40,28 @@
  * with no credentials at all if it turns out to have redirected. See
  * {@link fetchResourceWithoutCredentialLeak}.
  *
+ * **"Same-origin" is same-origin to whichever document made the reference,
+ * and that is why a reference carries its own scope.** This module used to
+ * take one page URL for the whole capture, which is indistinguishable from
+ * the right rule while there is exactly one document, and silently the
+ * wrong rule the moment there is more than one: a reference found in a
+ * child frame on origin B, pointing at a B resource, would be compared
+ * against the top document's origin A and lose the cookies it was due,
+ * while a B reference pointing at an A resource would be handed the user's
+ * authenticated A session purely because A happened to be the top document
+ * — a cross-origin credentialed request that no document on the page could
+ * have made for itself. So the unit the policy is evaluated for is a
+ * {@link ScopedResourceReference}: a URL together with the
+ * {@link CredentialScope} of the document that referenced it.
+ *
+ * The scope is *given* to this module, never inferred here from a frame's
+ * URL. A document's origin is not always its URL's origin — `srcdoc` and
+ * `about:blank` frames inherit their parent's, and a sandboxed frame has an
+ * opaque one no URL shows — so the one place that can state it correctly is
+ * the layer that captured the document. {@link credentialScopeForDocumentUrl}
+ * exists for the case where the URL really does decide it, and says so in
+ * its name rather than pretending to be general.
+ *
  * **Every response body is read against a bound.** `Content-Length` is
  * absent on a chunked response and is a claim rather than a fact when it is
  * present (both measured), so the bound is enforced by a reader that stops,
@@ -100,6 +122,76 @@ export interface ResourceRequestPolicy {
 	readonly credentials: 'include' | 'omit'
 }
 
+/**
+ * The security context a reference was found in, expressed as the one
+ * question the fetch policy asks of it: *whose credentials may this
+ * reference spend?*
+ *
+ * Two cases, because a document really does have two:
+ *
+ * - `origin` — a tuple origin, serialized the way the URL Standard
+ *   serializes one (`https://example.com`, port included when it is not the
+ *   default). A reference from such a document may be fetched with
+ *   credentials exactly when its target's origin is the same string.
+ * - `opaque` — the document has an opaque origin (a sandboxed frame, a
+ *   `data:` document), or its scope is simply not known. It is same-origin
+ *   with nothing this module can name, so every reference from it is
+ *   fetched with `credentials: 'omit'`. That is policy, not a measurement:
+ *   it is the direction that can only ever under-send, which is the same
+ *   choice the same-origin-rather-than-same-site rule above makes.
+ *
+ * It is not a bare `string`, and specifically not the *serialization* of an
+ * origin, because that serialization is lossy exactly where it is most
+ * dangerous: `URL.origin` renders every opaque origin as the string
+ * `"null"`, and two documents that both render to `"null"` are emphatically
+ * not each other's origin. A string-compared version of this rule would
+ * hand every sandboxed frame the credentials of every other one.
+ */
+export type CredentialScope = { readonly kind: 'origin'; readonly origin: string } | { readonly kind: 'opaque' }
+
+/**
+ * One reference to fetch, together with the credential scope of the
+ * document that referenced it.
+ *
+ * Deliberately a background-side type rather than a field on
+ * {@link NetworkResourceReference}: what comes back from the injected
+ * capture is a page's output, and the scope is not a page's claim to make.
+ * `capture.ts` attaches it on this side, per document, from what the
+ * privileged context knows about where that document came from.
+ */
+export interface ScopedResourceReference extends NetworkResourceReference {
+	readonly credentialScope: CredentialScope
+}
+
+/**
+ * The credential scope of a document whose origin really is its URL's
+ * origin — a top-level document the browser navigated to, which is every
+ * document Phase 1 captures.
+ *
+ * **Not a general frame-URL-to-scope function, which is why the name says
+ * `DocumentUrl`.** A `srcdoc` or `about:blank` frame inherits its parent's
+ * origin, and `new URL('about:blank').origin` is the string `"null"`; a
+ * sandboxed frame's origin is opaque whatever its URL looks like. Handing
+ * either of those to this function yields `opaque` — under-sending, so safe
+ * — but "safe" is not "correct", and a frame that inherits a real origin
+ * deserves the real one. Phase 2 must therefore state each frame's scope
+ * from what it observed of that frame, not from re-parsing its URL here.
+ *
+ * An unparseable URL is `opaque` for the same reason rather than refusing
+ * the fetch outright: the references are still ordinary `http(s)` URLs the
+ * document named, and fetching them without credentials is both useful and
+ * safe.
+ */
+export function credentialScopeForDocumentUrl(documentUrl: string): CredentialScope {
+	let url: URL
+	try {
+		url = new URL(documentUrl)
+	} catch {
+		return { kind: 'opaque' }
+	}
+	return url.origin === 'null' ? { kind: 'opaque' } : { kind: 'origin', origin: url.origin }
+}
+
 /** The response a resource's bytes will be read from, and whether getting it cost the credentials the policy had allowed. */
 export interface ResourceFetchAttempt {
 	readonly response: Response
@@ -109,24 +201,27 @@ export interface ResourceFetchAttempt {
 
 /**
  * Decides whether a URL harvested from a page may be fetched at all, and
- * with whose credentials.
+ * with whose credentials — where "whose" is decided by `credentialScope`,
+ * the scope of the document the reference was found in, not by the capture
+ * as a whole.
  *
  * Separated from the fetching so the policy is directly testable — it is
  * the security-relevant half, and the half that must not quietly drift.
  */
-export function classifyResourceUrl(rawUrl: string, pageUrl: string): ResourceRequestPolicy | undefined {
+export function classifyResourceUrl(rawUrl: string, credentialScope: CredentialScope): ResourceRequestPolicy | undefined {
 	let url: URL
-	let page: URL
 	try {
 		url = new URL(rawUrl)
-		page = new URL(pageUrl)
 	} catch {
 		return undefined
 	}
 	if (url.protocol !== 'http:' && url.protocol !== 'https:') {
 		return undefined
 	}
-	return { url: url.href, credentials: url.origin === page.origin ? 'include' : 'omit' }
+	// Note which origin is on each side: the *referencing document's*, never
+	// the capture's top document's. They are the same thing only while a
+	// capture holds one document.
+	return { url: url.href, credentials: credentialScope.kind === 'origin' && url.origin === credentialScope.origin ? 'include' : 'omit' }
 }
 
 /**
@@ -304,8 +399,14 @@ function createByteBudget(limits: ResourceFetchLimits): ByteBudget {
  * parser uses. Nothing is ever invented to stand in for a resource, and a
  * resource is stored under the URL the page referenced, never under the one
  * a redirect happened to land on: the archived markup names the former.
+ *
+ * Every reference brings its own {@link CredentialScope}, so a capture that
+ * spans several documents gets one credential decision per reference rather
+ * than one per capture. The rest — the shared byte budget, the worker pool,
+ * the bounds — is per *capture*, and stays that way: the scope is a
+ * security boundary, not a resource one.
  */
-export async function acquireResources(references: readonly NetworkResourceReference[], pageUrl: string, limits: ResourceFetchLimits): Promise<ResourceAcquisitionResult> {
+export async function acquireResources(references: readonly ScopedResourceReference[], limits: ResourceFetchLimits): Promise<ResourceAcquisitionResult> {
 	const resources: AcquiredResource[] = []
 	const diagnostics: Diagnostic[] = []
 
@@ -317,7 +418,7 @@ export async function acquireResources(references: readonly NetworkResourceRefer
 			if (reference === undefined) {
 				return
 			}
-			const policy = classifyResourceUrl(reference.url, pageUrl)
+			const policy = classifyResourceUrl(reference.url, reference.credentialScope)
 			if (policy === undefined) {
 				// A scheme the capture will not request. Not an error in the
 				// archive's own terms — the reference stays in the markup — but the
