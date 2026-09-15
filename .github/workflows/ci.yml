@@ -44,10 +44,16 @@ jobs:
 
   # The Firefox lane is separate from the Chrome one because it needs a
   # different browser and a different runner (WebDriver BiDi, not Playwright
-  # — Playwright cannot load a Firefox extension). Firefox comes from the
-  # runner image rather than being pinned: this lane currently asserts only
-  # that the production build installs and runs, and the version floor that
-  # matters is enforced by the manifest's own `strict_min_version`.
+  # — Playwright cannot load a Firefox extension). Firefox is pinned here,
+  # not taken from the runner image: measured, Firefox 155 added a second
+  # WebDriver BiDi restriction beyond the `--remote-allow-system-access` gate
+  # this harness already works around (bidi-session.ts) — `input.performActions`
+  # unconditionally refuses a `moz-extension:` browsing context ("privileged
+  # scope"), which is what this suite needs to exercise `permissions.request()`
+  # from a genuine gesture. That refusal is a hardcoded per-command allowlist
+  # in Firefox's own source (`supportsPrivilegedScope`, opted into only by the
+  # BiDi `browsingContext` and `script` modules), not a capability any client
+  # can request — 154.0.1 is the newest release measured to still allow it.
   # See docs/architecture.md, "Browser automation: where this is going".
   extension-e2e-firefox:
     runs-on: ubuntu-latest
@@ -59,6 +65,28 @@ jobs:
           cache: npm
       - run: npm ci
       - uses: browser-actions/setup-firefox@v1
+        with:
+          firefox-version: '154.0.1'
       # The E2E suite installs `apps/extension/dist-firefox`, so it has to exist.
+      - run: npm run build
+      - run: npm run test:e2e:firefox
+
+  # A canary, not a gate: runs the identical suite against whatever Firefox
+  # is currently "latest", so a future WebDriver BiDi restriction (like the
+  # two the pinned lane above already works around or is blocked by) shows up
+  # promptly instead of silently at the next manual investigation. Never
+  # blocks a merge — `continue-on-error` — because "latest" moving out from
+  # under this suite is expected, not a defect in this PR.
+  extension-e2e-firefox-latest:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - uses: browser-actions/setup-firefox@v1
       - run: npm run build
       - run: npm run test:e2e:firefox

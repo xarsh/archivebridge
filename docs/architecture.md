@@ -2661,6 +2661,24 @@ fidelity regression.
   auto-answers the optional-permission doorhanger lives in the throwaway
   profile, like the pinned UUID, never in `src/`.
 
+  **What this lane can reach is also bounded by Firefox's own version, not
+  just this repo's harness — measured across 152.0.1 through 155.0.1.**
+  Since Firefox 153, WebDriver BiDi refuses `browsingContext.navigate` to a
+  `moz-extension:` destination unless the browser is launched with
+  `--remote-allow-system-access`; the harness always passes it (a no-op,
+  measured, on Firefox too old to recognize it). Since Firefox 155, BiDi
+  goes further and refuses `input.performActions` on a `moz-extension:`
+  browsing context *unconditionally* — this is not a capability any launch
+  flag or session capability grants: Firefox's WebDriver BiDi module base
+  class gates every command behind a hardcoded per-module allowlist
+  (`supportsPrivilegedScope`), and only the `browsingContext` and `script`
+  modules are on it; Marionette's classic actions are gated the same way.
+  That removes this lane's only way to exercise `permissions.request()`
+  from a genuine gesture on Firefox 155+, so CI (`ci.yml`) pins the newest
+  release still measured to allow it (154.0.1) as the required gate, and
+  runs an unpinned "latest" lane alongside it that never blocks a merge —
+  a canary for the next such change, not a second required gate.
+
   Still to come, with the phases they belong to: cross-origin frames,
   constructed stylesheets, and a Chrome-vs-Firefox differential lane —
   which would need an explicit allowance list (`<script>`, `srcset`,

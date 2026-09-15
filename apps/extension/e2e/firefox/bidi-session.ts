@@ -38,14 +38,39 @@
  *   actual pointer event through `input.performActions` instead, which
  *   resolves it — so the production popup's gesture ordering is exercised
  *   as the user would exercise it, not simulated around.
+ * - **`browsingContext.navigate` to a `moz-extension:` page needs system
+ *   access**, as of Firefox 153 (measured: allowed on 152.0.1, rejected from
+ *   153.0 through 155.0.1 with `unsupported operation: ... is not allowed in
+ *   this context`). This is Mozilla's own privileged-navigation gate for
+ *   BiDi (bug 1944565) — it is not specific to extension pages, it also
+ *   covers e.g. chrome browsing contexts — and Firefox exposes it as an
+ *   explicit opt-in launch flag rather than a default, so
+ *   `startFirefoxSession` below passes `--remote-allow-system-access`.
+ *   Measured harmless on 152.0.1 too (an unrecognized flag is a silent no-op
+ *   there), so this is not a version-gated code path.
+ * - **Firefox 155 went further: `input.performActions` unconditionally
+ *   refuses a `moz-extension:` browsing context**, flag or no flag
+ *   (`unsupported operation: The command does not support browsing contexts
+ *   in privileged scope`, measured — present on 155.0.1, absent on 154.0.1
+ *   with the same flag). This is not a capability any client can request:
+ *   Firefox's WebDriver BiDi module base class (`RootBiDiModule.sys.mjs`)
+ *   gates every command behind `supportsPrivilegedScope`, a hardcoded
+ *   per-module flag that only the `browsingContext` and `script` modules set
+ *   — `input` does not, and Marionette's classic actions are gated the same
+ *   way in `driver.sys.mjs`. So {@link FirefoxSession.click}, which this
+ *   gesture depends on, cannot reach a `moz-extension:` page on Firefox ≥155
+ *   at all today; see CI's Firefox version pin (`ci.yml`) for the
+ *   consequence.
  *
- * **Firefox is taken from the machine, not downloaded.** `FIREFOX_BIN`
- * overrides the binary; otherwise `firefox` from `PATH`. The repository
- * pins no browser for either lane (the Chrome lane uses whatever
- * `npx playwright install chromium` fetched), so pinning one here would be
- * a new policy — and a new download/install step in CI. The floor that
- * *is* enforced is the manifest's `strict_min_version: "128.0"`: an older
- * Firefox refuses the install and the test fails loudly rather than
+ * **Firefox is pinned in CI, taken from the machine locally.** `FIREFOX_BIN`
+ * overrides the binary; otherwise `firefox` from `PATH` — which is how local
+ * runs work, and why a `FIREFOX_BIN` pointed at Firefox ≥155 will fail the
+ * gesture-dependent Phase 1 assertions above for a real, current-platform
+ * reason, not a harness bug. CI itself pins an exact version (`ci.yml`)
+ * precisely to keep those assertions meaningful; see the comment there for
+ * why 154.0.1 and the "latest" canary lane alongside it. The floor that is
+ * *separately* enforced is the manifest's own `strict_min_version: "128.0"`:
+ * an older Firefox refuses the install and the test fails loudly rather than
  * silently testing something else.
  */
 
@@ -210,6 +235,47 @@ async function writeProfile(profileDir: string, extensionId: string, extensionUu
 	await writeFile(join(profileDir, 'user.js'), `${prefs}\n`)
 }
 
+/**
+ * Firefox 153+ rejects BiDi `browsingContext.navigate` to a `moz-extension:`
+ * page unless system access is enabled (see the module doc), and
+ * `startFirefoxSession` always passes `--remote-allow-system-access` to
+ * prevent exactly that. If this error surfaces anyway, the flag was not
+ * honored — a Firefox build too old to know it exists is not the failure
+ * mode (measured no-op there); a wrapper stripping CLI args, or a further
+ * Mozilla policy change, are the likely causes. Naming that here turns N
+ * identically cryptic BiDi errors, one per test that opens a page, into N
+ * that each explain the actual failure.
+ */
+export function explainNavigateFailure(url: string, error: Error): Error {
+	const isSystemAccessRejection = /unsupported operation/i.test(error.message) && /not allowed in this context/i.test(error.message)
+	if (!url.startsWith('moz-extension:') || !isSystemAccessRejection) {
+		return error
+	}
+	return new Error(
+		`${error.message}\n\nThis harness always launches Firefox with --remote-allow-system-access so that BiDi may navigate to moz-extension: pages (see bidi-session.ts's module doc). Seeing this error anyway means that flag was not honored by this Firefox build — check that nothing strips CLI args before launch, and that this Firefox version's WebDriver BiDi still grants moz-extension: navigation under system access at all (Mozilla bug 1944565).`,
+	)
+}
+
+/**
+ * Firefox 155 unconditionally refuses BiDi `input.performActions` on a
+ * `moz-extension:` browsing context — no launch flag changes this (see the
+ * module doc: it is a hardcoded per-module allowlist in Firefox's own
+ * source, and `input` is not on it). So this is not a harness bug to chase
+ * further; it is a real capability Firefox removed. CI pins a Firefox
+ * version that still has it (see `ci.yml`) for exactly this reason — seeing
+ * this error there would mean the pin regressed, not that the flag is
+ * missing.
+ */
+export function explainClickFailure(context: string, error: Error): Error {
+	const isPrivilegedScopeRejection = /unsupported operation/i.test(error.message) && /privileged scope/i.test(error.message)
+	if (!isPrivilegedScopeRejection) {
+		return error
+	}
+	return new Error(
+		`${error.message}\n\nFirefox 155+ refuses input.performActions on a moz-extension: browsing context entirely — no launch flag grants it (see bidi-session.ts's module doc). If this is the pinned CI lane (ci.yml), the pinned Firefox version no longer has this capability and the pin needs revisiting; if this is the "latest" canary lane, this is the expected, already-known failure mode, not a new bug. Browsing context: ${context}.`,
+	)
+}
+
 /** Reads the BiDi WebSocket URL out of Firefox's own startup output. */
 function waitForBidiUrl(process: ReturnType<typeof spawn>): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -270,7 +336,12 @@ export async function startFirefoxSession(): Promise<FirefoxSession> {
 	// it prints the one it bound, so a collision surfaces as a startup failure
 	// rather than as a connection to someone else's browser.
 	const port = 10_000 + Math.floor(Math.random() * 40_000)
-	const firefox = spawn(FIREFOX_BINARY, ['--profile', profileDir, '--remote-debugging-port', String(port), '--headless', '--no-remote'], { stdio: ['ignore', 'pipe', 'pipe'] })
+	// `--remote-allow-system-access`: required since Firefox 155 for BiDi to
+	// navigate a `moz-extension:` page at all (see the module doc); a no-op
+	// on older Firefox that does not recognize the flag (measured).
+	const firefox = spawn(FIREFOX_BINARY, ['--profile', profileDir, '--remote-debugging-port', String(port), '--headless', '--no-remote', '--remote-allow-system-access'], {
+		stdio: ['ignore', 'pipe', 'pipe'],
+	})
 
 	const cleanup = async (connection?: BidiConnection) => {
 		connection?.close()
@@ -314,7 +385,11 @@ export async function startFirefoxSession(): Promise<FirefoxSession> {
 				// `wait: "interactive"` rather than `"complete"`: a page containing a
 				// frame that cannot connect makes `"complete"` reject with
 				// `Address rejected` even though the navigation itself succeeded.
-				await openConnection.send('browsingContext.navigate', { context, url, wait: 'interactive' })
+				try {
+					await openConnection.send('browsingContext.navigate', { context, url, wait: 'interactive' })
+				} catch (error) {
+					throw explainNavigateFailure(url, error as Error)
+				}
 				return context
 			},
 			evaluate: async (context, expression) => {
@@ -338,21 +413,25 @@ export async function startFirefoxSession(): Promise<FirefoxSession> {
 					resultOwnership: 'none',
 				})
 				const { x, y } = JSON.parse(String(deserialize(box.result as RemoteValue | undefined))) as { x: number; y: number }
-				await openConnection.send('input.performActions', {
-					context,
-					actions: [
-						{
-							type: 'pointer',
-							id: 'mouse',
-							parameters: { pointerType: 'mouse' },
-							actions: [
-								{ type: 'pointerMove', x, y },
-								{ type: 'pointerDown', button: 0 },
-								{ type: 'pointerUp', button: 0 },
-							],
-						},
-					],
-				})
+				try {
+					await openConnection.send('input.performActions', {
+						context,
+						actions: [
+							{
+								type: 'pointer',
+								id: 'mouse',
+								parameters: { pointerType: 'mouse' },
+								actions: [
+									{ type: 'pointerMove', x, y },
+									{ type: 'pointerDown', button: 0 },
+									{ type: 'pointerUp', button: 0 },
+								],
+							},
+						],
+					})
+				} catch (error) {
+					throw explainClickFailure(context, error as Error)
+				}
 			},
 			close: async () => {
 				try {

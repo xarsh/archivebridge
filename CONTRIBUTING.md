@@ -326,6 +326,20 @@ rather than chosen, and both are worth knowing before adding a test:
   `extensions.webextOptionalPermissionPrompts=false` to answer it — which
   changes who answers the prompt, not whether production asks. The
   gesture, the call site and its ordering are all the real ones.
+- **Two Firefox versions, measured, gate what this lane can do at all.**
+  Since Firefox 153, BiDi's `browsingContext.navigate` refuses a
+  `moz-extension:` destination unless the browser is launched with
+  `--remote-allow-system-access`; `bidi-session.ts` always passes it (a
+  harmless no-op on older Firefox that doesn't recognize it), and
+  `explainNavigateFailure` turns a regression there into a named error
+  instead of a bare BiDi one. Since Firefox 155, `input.performActions` goes
+  further and refuses a `moz-extension:` browsing context *unconditionally*
+  — no flag grants it back, because it's a hardcoded per-module allowlist in
+  Firefox's own WebDriver BiDi implementation that `input` isn't on
+  (`explainClickFailure` names this one the same way). That second
+  restriction removes this lane's ability to exercise a genuine gesture on
+  the popup at all, which is why CI pins an exact Firefox version rather
+  than tracking latest — see `ci.yml`'s comment on `extension-e2e-firefox`.
 
 ```sh
 npm run build
@@ -333,12 +347,15 @@ npm run test:e2e:firefox          # uses `firefox` from PATH
 FIREFOX_BIN=/path/to/firefox npm run test:e2e:firefox
 ```
 
-Firefox is taken from the machine rather than pinned or downloaded, the
-same way the Chrome lane uses whatever `npx playwright install chromium`
-fetched. The floor that *is* enforced is `manifest.firefox.json`'s
-`strict_min_version: "128.0"`, which the browser itself checks at install:
-an older Firefox refuses the extension and the suite fails loudly instead
-of quietly testing something else.
+Locally this still takes Firefox from the machine — `firefox` from `PATH`,
+or `FIREFOX_BIN` — the same way the Chrome lane uses whatever
+`npx playwright install chromium` fetched. A `FIREFOX_BIN` pointed at
+Firefox 155 or newer will fail the gesture-dependent Phase 1 assertions for
+the real reason above, not a harness bug. The floor that *is* enforced
+everywhere is `manifest.firefox.json`'s `strict_min_version: "128.0"`,
+which the browser itself checks at install: an older Firefox refuses the
+extension and the suite fails loudly instead of quietly testing something
+else.
 
 Neither suite is part of `npm run check`, because both need a browser
 binary that the unit-test gate must not require. Each has its own CI job.
