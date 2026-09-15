@@ -72,6 +72,24 @@
  * *separately* enforced is the manifest's own `strict_min_version: "128.0"`:
  * an older Firefox refuses the install and the test fails loudly rather than
  * silently testing something else.
+ *
+ * **Headless Linux Firefox cannot show the native save chooser at all —
+ * this is not the same restriction as the two above, and no launch flag
+ * fixes it.** Measured on Firefox 154.0.1: with `--headless` on Linux,
+ * `browser.downloads.download({ saveAs: true })` rejects *immediately*
+ * with `An unexpected error occurred` — not after opening a chooser, not
+ * after a delay, and that message is Firefox's own; nothing in this
+ * extension or harness wraps or generates it, so there is no more specific
+ * error to surface. The identical call under a real X display (headless
+ * Firefox launched instead under Xvfb) leaves the promise pending exactly
+ * as the two save-command tests expect, with no file written and no
+ * special handling needed to kill Firefox while the chooser is still open
+ * (measured: clean process exit, nothing left in the download directory).
+ * Measured on macOS too, where headless Firefox has no equivalent failure
+ * — so this is Linux's headless mode specifically lacking a window server
+ * for `nsIFilePicker`, not `saveAs: true` being unreliable in general.
+ * `FIREFOX_HEADED=1` below switches this harness to the headed launch that
+ * behavior needs; CI sets it and runs under Xvfb (`ci.yml`).
  */
 
 import { spawn } from 'node:child_process'
@@ -85,6 +103,35 @@ import { fileURLToPath } from 'node:url'
 export const builtFirefoxExtensionDir = join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), 'dist-firefox')
 
 const FIREFOX_BINARY = process.env.FIREFOX_BIN ?? 'firefox'
+
+/**
+ * Launches Firefox with a visible window instead of `--headless`. Explicit
+ * rather than inferred from `DISPLAY` being set, because the two behave
+ * differently for `saveAs: true` on Linux (see the module doc) and that
+ * difference must be a deliberate choice about what the save-command tests
+ * are measuring, not an accident of whatever environment happened to start
+ * this process. CI sets it; local runs default to headless, matching
+ * every platform where that already works (macOS, Windows, and Linux with
+ * no display server, e.g. most containers).
+ */
+const FIREFOX_HEADED = process.env.FIREFOX_HEADED === '1'
+
+/**
+ * `FIREFOX_HEADED=1` on Linux with no `DISPLAY` would launch a windowed
+ * Firefox with no window server to put its window on. Refusing to start is
+ * the safe failure here: silently falling back to headless would make the
+ * two save-command tests fail with the confusing "An unexpected error
+ * occurred" this module doc measures, rather than naming the actual
+ * misconfiguration.
+ */
+export function checkDisplayAvailable(headed: boolean, platform: string, display: string | undefined): void {
+	if (!headed || platform !== 'linux' || (display !== undefined && display !== '')) {
+		return
+	}
+	throw new Error(
+		"FIREFOX_HEADED=1 was set but DISPLAY is not, on Linux. Firefox's native save-file chooser — what the two save-command tests park on — needs a real X display there; run this under a virtual one (e.g. `xvfb-run -a npm run test:e2e:firefox`), or unset FIREFOX_HEADED to fall back to headless (which cannot exercise those two tests' assertion; see bidi-session.ts's module doc).",
+	)
+}
 
 /** Long enough to cover a cold Firefox start on a loaded CI machine, short enough to fail rather than hang. */
 const COMMAND_TIMEOUT_MS = 30_000
@@ -325,8 +372,9 @@ async function readExtensionId(): Promise<string> {
 	return id
 }
 
-/** Launches headless Firefox, installs `dist-firefox/`, and returns a session addressed by a UUID pinned before launch. */
+/** Launches Firefox (headless unless `FIREFOX_HEADED=1`), installs `dist-firefox/`, and returns a session addressed by a UUID pinned before launch. */
 export async function startFirefoxSession(): Promise<FirefoxSession> {
+	checkDisplayAvailable(FIREFOX_HEADED, process.platform, process.env.DISPLAY)
 	const extensionId = await readExtensionId()
 	const extensionUuid = randomUUID()
 	const profileDir = await mkdtemp(join(tmpdir(), 'archivebridge-firefox-e2e-'))
@@ -339,7 +387,11 @@ export async function startFirefoxSession(): Promise<FirefoxSession> {
 	// `--remote-allow-system-access`: required since Firefox 155 for BiDi to
 	// navigate a `moz-extension:` page at all (see the module doc); a no-op
 	// on older Firefox that does not recognize the flag (measured).
-	const firefox = spawn(FIREFOX_BINARY, ['--profile', profileDir, '--remote-debugging-port', String(port), '--headless', '--no-remote', '--remote-allow-system-access'], {
+	const args = ['--profile', profileDir, '--remote-debugging-port', String(port), '--no-remote', '--remote-allow-system-access']
+	if (!FIREFOX_HEADED) {
+		args.push('--headless')
+	}
+	const firefox = spawn(FIREFOX_BINARY, args, {
 		stdio: ['ignore', 'pipe', 'pipe'],
 	})
 

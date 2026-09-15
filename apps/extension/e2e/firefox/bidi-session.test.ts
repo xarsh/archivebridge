@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { explainClickFailure, explainNavigateFailure } from './bidi-session.ts'
+import { checkDisplayAvailable, explainClickFailure, explainNavigateFailure } from './bidi-session.ts'
 
 test('explainNavigateFailure names the required launch flag for a moz-extension: navigation Firefox rejected', () => {
 	const rejected = new Error('BiDi error: unsupported operation: Navigation to "moz-extension://abc/popup.html" is not allowed in this context')
@@ -43,4 +43,26 @@ test('explainClickFailure names the Firefox 155+ restriction for input.performAc
 test('explainClickFailure leaves an unrelated error untouched', () => {
 	const timeout = new Error('BiDi timed out waiting for input.performActions')
 	assert.equal(explainClickFailure('abc-context', timeout), timeout)
+})
+
+test('checkDisplayAvailable refuses headed Firefox on Linux with no DISPLAY', () => {
+	assert.throws(() => checkDisplayAvailable(true, 'linux', undefined), /DISPLAY/)
+	assert.throws(() => checkDisplayAvailable(true, 'linux', ''), /DISPLAY/)
+})
+
+test('checkDisplayAvailable allows headed Firefox on Linux once DISPLAY is set', () => {
+	assert.doesNotThrow(() => checkDisplayAvailable(true, 'linux', ':99'))
+})
+
+test('checkDisplayAvailable never checks DISPLAY for headless Firefox', () => {
+	// Headless needs no window server at all, so a missing DISPLAY here is not
+	// this function's business — only a headed request makes it one.
+	assert.doesNotThrow(() => checkDisplayAvailable(false, 'linux', undefined))
+})
+
+test('checkDisplayAvailable never checks DISPLAY off Linux', () => {
+	// macOS and Windows show a window with no DISPLAY env var at all; asking
+	// for one there would be a false positive, not a safety check.
+	assert.doesNotThrow(() => checkDisplayAvailable(true, 'darwin', undefined))
+	assert.doesNotThrow(() => checkDisplayAvailable(true, 'win32', undefined))
 })

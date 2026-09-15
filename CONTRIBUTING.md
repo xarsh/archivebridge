@@ -340,11 +340,27 @@ rather than chosen, and both are worth knowing before adding a test:
   restriction removes this lane's ability to exercise a genuine gesture on
   the popup at all, which is why CI pins an exact Firefox version rather
   than tracking latest — see `ci.yml`'s comment on `extension-e2e-firefox`.
+- **Headless Firefox on Linux cannot run the two save-command tests, and
+  this is unrelated to the two restrictions above.** Measured on Firefox
+  154.0.1: with `--headless` on Linux, `browser.downloads.download({
+  saveAs: true })` rejects immediately with Firefox's own `An unexpected
+  error occurred` — there is no native window to put the save-file chooser
+  on — instead of leaving the promise pending on it, which is exactly the
+  state those two tests assert on. Headed Firefox under a real (or
+  virtual, e.g. Xvfb) X display does not have this problem; macOS has no
+  equivalent failure in headless mode either, so this is Linux headless
+  specifically, not `saveAs: true` being unreliable in general.
+  `FIREFOX_HEADED=1` switches this harness to a headed launch;
+  `checkDisplayAvailable` (`bidi-session.ts`) fails fast, naming the fix,
+  if that's set on Linux with no `DISPLAY`. CI's required and canary
+  Firefox lanes both set it and run under Xvfb (`ci.yml`).
 
 ```sh
 npm run build
-npm run test:e2e:firefox          # uses `firefox` from PATH
+npm run test:e2e:firefox          # uses `firefox` from PATH, headless
 FIREFOX_BIN=/path/to/firefox npm run test:e2e:firefox
+FIREFOX_HEADED=1 npm run test:e2e:firefox        # needs a real display; on
+                                                  # Linux, run under Xvfb
 ```
 
 Locally this still takes Firefox from the machine — `firefox` from `PATH`,
@@ -355,7 +371,10 @@ the real reason above, not a harness bug. The floor that *is* enforced
 everywhere is `manifest.firefox.json`'s `strict_min_version: "128.0"`,
 which the browser itself checks at install: an older Firefox refuses the
 extension and the suite fails loudly instead of quietly testing something
-else.
+else. Local runs default to headless (`FIREFOX_HEADED` unset), which is
+enough everywhere headless already works for the save-command tests
+(macOS, Windows, and Linux with no display server); a Linux desktop
+running the suite locally needs `FIREFOX_HEADED=1` the same way CI does.
 
 Neither suite is part of `npm run check`, because both need a browser
 binary that the unit-test gate must not require. Each has its own CI job.

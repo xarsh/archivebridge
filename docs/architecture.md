@@ -2679,6 +2679,24 @@ fidelity regression.
   runs an unpinned "latest" lane alongside it that never blocks a merge —
   a canary for the next such change, not a second required gate.
 
+  **Headless Firefox on Linux cannot run the two save-command tests at
+  all, for a third and unrelated reason.** Measured on Firefox 154.0.1:
+  `browser.downloads.download({ saveAs: true })` needs a real window to
+  show its native chooser on, and headless Firefox on Linux has none — the
+  call rejects immediately with Firefox's own generic `An unexpected error
+  occurred` instead of leaving the promise pending on the chooser, which
+  is the very state those two tests assert on. That is not a harness bug
+  to work around with a different assertion: headed Firefox under a real
+  (or virtual) X display behaves exactly as the tests expect — pending,
+  no file written, and no special handling needed to tear Firefox down
+  while the chooser is still open — and macOS has no equivalent failure in
+  headless mode, so the assumption those tests encode is not
+  platform-specific, only Linux's headless mode's lack of a window server
+  is. `bidi-session.ts` launches headed on `FIREFOX_HEADED=1` rather than
+  inferring it from `DISPLAY`, and refuses to start rather than silently
+  falling back to headless if that's set on Linux with none — both CI
+  Firefox lanes set it and run under Xvfb (`ci.yml`).
+
   Still to come, with the phases they belong to: cross-origin frames,
   constructed stylesheets, and a Chrome-vs-Firefox differential lane —
   which would need an explicit allowance list (`<script>`, `srcset`,

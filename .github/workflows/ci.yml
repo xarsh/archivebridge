@@ -55,6 +55,14 @@ jobs:
   # BiDi `browsingContext` and `script` modules), not a capability any client
   # can request — 154.0.1 is the newest release measured to still allow it.
   # See docs/architecture.md, "Browser automation: where this is going".
+  #
+  # Runs under Xvfb, headed (`FIREFOX_HEADED=1`): measured on Firefox 154.0.1,
+  # headless Firefox on Linux cannot show the native save-file chooser at all
+  # — `downloads.download({ saveAs: true })` rejects immediately with "An
+  # unexpected error occurred" instead of parking on it, which is exactly the
+  # state the two save-command tests assert on. Headed Firefox under a real
+  # (virtual) X display does not have this problem; see bidi-session.ts's
+  # module doc for the measurement.
   extension-e2e-firefox:
     runs-on: ubuntu-latest
     steps:
@@ -67,9 +75,12 @@ jobs:
       - uses: browser-actions/setup-firefox@v1
         with:
           firefox-version: '154.0.1'
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
       # The E2E suite installs `apps/extension/dist-firefox`, so it has to exist.
       - run: npm run build
-      - run: npm run test:e2e:firefox
+      - run: xvfb-run -a npm run test:e2e:firefox
+        env:
+          FIREFOX_HEADED: '1'
 
   # A canary, not a gate: runs the identical suite against whatever Firefox
   # is currently "latest", so a future WebDriver BiDi restriction (like the
@@ -88,5 +99,12 @@ jobs:
           cache: npm
       - run: npm ci
       - uses: browser-actions/setup-firefox@v1
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: npm run build
-      - run: npm run test:e2e:firefox
+      # Headed under Xvfb, same as the required lane above (see its comment)
+      # — otherwise this canary would fail at the save-command tests for the
+      # headless-on-Linux reason, masking whatever it's actually meant to
+      # catch: the next WebDriver BiDi restriction on a future Firefox.
+      - run: xvfb-run -a npm run test:e2e:firefox
+        env:
+          FIREFOX_HEADED: '1'
