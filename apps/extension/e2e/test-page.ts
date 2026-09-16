@@ -521,6 +521,241 @@ function firefoxPages(origin: string, crossOrigin: string): ReadonlyMap<string, 
 	])
 }
 
+/**
+ * The fixture the Firefox frame-identity probe measures, at
+ * {@link FRAME_IDENTITY_PATH}.
+ *
+ * Frame capture links a captured child document to the element that owns
+ * it by *position*, never by URL — two frames can share a `src`, a
+ * `srcdoc` frame has none, and a frame may have navigated since load. So
+ * the thing that has to be measured is whether three separate positional
+ * numberings agree, and where they do not:
+ *
+ * - the child's own index in `window.parent.frames`;
+ * - the parent's index for that container, from
+ *   `container.contentWindow === window.frames[i]`;
+ * - the container's ordinal in the **serialized HTML**, which is the only
+ *   position a library rewriting archived markup can see.
+ *
+ * Every hostile case this fixture holds is there because it makes one of
+ * those three disagree, or because it is a frame kind whose identity is
+ * not keyed on a URL at all:
+ *
+ * - an `<object>` and an `<embed>` **first in the document**, before any
+ *   `<iframe>`, because a nested browsing context they host occupies a
+ *   `window.frames` index while *not* being a frame container any
+ *   `<iframe>`/`<frame>` ordinal counts — which is what makes DOM ordinal
+ *   and browsing-context index different numbers rather than the same
+ *   number twice;
+ * - an `<iframe>` inside an **open shadow root**, placed between two
+ *   ordinary ones, because it is absent from `document.querySelectorAll`
+ *   but present in the serialized snapshot (the capture emits shadow roots
+ *   as `<template shadowrootmode>`), so a naive light-DOM ordinal and the
+ *   serialized ordinal diverge from there on;
+ * - **two siblings with an identical `src`**, the case URL matching cannot
+ *   distinguish at all;
+ * - `srcdoc`, a no-`src` `about:blank` written into by its parent, and a
+ *   `sandbox=""` frame — three documents whose origin does not come from a
+ *   URL;
+ * - a **cross-origin** frame and a nested tree that crosses origin in both
+ *   directions, since `window.frameElement` is `null` cross-origin and the
+ *   parent cannot read the child at all;
+ * - a frame pointed at {@link FRAME_IDENTITY_FAILED_URL}, which occupies a
+ *   position with no document behind it.
+ *
+ * Ordinary markup sits between the containers so no ordinal can accidentally
+ * be right because the frames happened to be adjacent, and every document
+ * names itself in `data-ab-frame` so the probe identifies a frame by what it
+ * *is* rather than by where it was expected.
+ */
+export const FRAME_IDENTITY_PATH = '/firefox/frame-identity.html'
+
+/** What {@link FRAME_IDENTITY_PATH} renames itself to once every frame it owns has settled and its scripted frames have been built. */
+export const FRAME_IDENTITY_READY_TITLE = 'frame identity ready'
+
+/** The legacy `<frameset>` fixture. Separate because a frameset document has no `<body>`, so it cannot be a section of any other page. */
+export const FRAME_IDENTITY_FRAMESET_PATH = '/firefox/identity/frameset.html'
+
+/** What {@link FRAME_IDENTITY_FRAMESET_PATH} renames itself to once both its frames have loaded. */
+export const FRAME_IDENTITY_FRAMESET_READY_TITLE = 'frameset ready'
+
+/** A frame source nothing answers: port 9 is discard, closed on this loopback interface, so the load fails without a timeout. The one frame position in the fixture with no document behind it. */
+export const FRAME_IDENTITY_FAILED_URL = 'http://127.0.0.1:9/never.html'
+
+/** The marker each fixture document carries in `data-ab-frame`, in the browsing-context order the probe is expected to find them. Exported so the probe asserts on names rather than on positions it also computed. */
+export const FRAME_IDENTITY_MARKERS = {
+	top: 'top',
+	objectSvg: 'object-svg',
+	embedSvg: 'embed-svg',
+	sameOrigin: 'same-origin',
+	crossOrigin: 'cross-origin',
+	duplicate: 'duplicate',
+	nestedParent: 'nested-parent',
+	nestedSame: 'nested-same',
+	nestedCross: 'nested-cross',
+	nestedDeep: 'nested-deep',
+	srcdoc: 'srcdoc',
+	aboutBlank: 'about-blank',
+	sandboxed: 'sandboxed',
+	inShadow: 'in-shadow',
+	inShadowCross: 'in-shadow-cross',
+	inDeclarativeShadow: 'in-declarative-shadow',
+	framesetTop: 'frameset-top',
+	framesetA: 'frameset-a',
+	framesetB: 'frameset-b',
+} as const
+
+/** One fixture document, naming itself in `data-ab-frame` so the probe can tell which frame answered without trusting a URL. */
+function identityDocument(marker: string, title: string, body: string): { readonly contentType: string; readonly body: string } {
+	return {
+		contentType: 'text/html; charset=utf-8',
+		body: `<!doctype html>\n<html lang="en" data-ab-frame="${marker}">\n<head><meta charset="utf-8"><title>${title}</title></head>\n<body>\n${body}\n</body>\n</html>\n`,
+	}
+}
+
+/** An SVG document for the `<object>`/`<embed>` pair, which is the measured way to make Firefox give one of those elements a nested browsing context. */
+function identitySvg(marker: string): { readonly contentType: string; readonly body: string } {
+	return {
+		contentType: 'image/svg+xml',
+		body: `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" data-ab-frame="${marker}"><rect width="40" height="40" fill="#cccccc"></rect></svg>\n`,
+	}
+}
+
+function frameIdentityPages(origin: string, crossOrigin: string): ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> {
+	const marker = FRAME_IDENTITY_MARKERS
+	return new Map([
+		[
+			FRAME_IDENTITY_PATH,
+			{
+				contentType: 'text/html; charset=utf-8',
+				body: `<!doctype html>
+<html lang="en" data-ab-frame="${marker.top}">
+<head><meta charset="utf-8"><title>ArchiveBridge frame identity fixture</title></head>
+<body>
+<h1 id="heading">Frame identity fixture</h1>
+<p class="filler">FRAME_IDENTITY_CONTENT</p>
+<div id="declarative-shadow-host"><template shadowrootmode="open"><p>declarative shadow</p><iframe id="in-declarative-shadow" src="${origin}/firefox/identity/in-declarative-shadow.html"></iframe></template></div>
+<p class="filler">between the declarative shadow root and the object</p>
+<object id="object-svg" type="image/svg+xml" data="${origin}/firefox/identity/object.svg" width="40" height="40"></object>
+<p class="filler">between the object and the embed</p>
+<embed id="embed-svg" type="image/svg+xml" src="${origin}/firefox/identity/embed.svg" width="40" height="40">
+<p class="filler">between the embed and the first iframe</p>
+<iframe id="same-origin" src="${origin}/firefox/identity/same-origin.html"></iframe>
+<p class="filler">before the shadow root, whose frames the two sides of the join disagree about</p>
+<div id="shadow-host"></div>
+<p class="filler">between the shadow root and the cross-origin frame</p>
+<iframe id="cross-origin" src="${crossOrigin}/firefox/identity/cross-origin.html"></iframe>
+<p class="filler">before the two frames that share a src</p>
+<iframe id="duplicate-a" src="${origin}/firefox/identity/duplicate.html"></iframe>
+<iframe id="duplicate-b" src="${origin}/firefox/identity/duplicate.html"></iframe>
+<p class="filler">before the nested tree</p>
+<iframe id="nested-parent" src="${origin}/firefox/identity/nested-parent.html"></iframe>
+<p class="filler">before the frames with no URL of their own</p>
+<iframe id="srcdoc" srcdoc='<!doctype html><html lang="en" data-ab-frame="${marker.srcdoc}"><head><meta charset="utf-8"><title>srcdoc frame</title></head><body><p id="framed">SRCDOC_CONTENT</p></body></html>'></iframe>
+<iframe id="about-blank"></iframe>
+<p class="filler">before the sandboxed frame</p>
+<iframe id="sandboxed" sandbox="" src="${origin}/firefox/identity/sandboxed.html"></iframe>
+<p class="filler">before the frame that cannot load</p>
+<iframe id="failed" src="${FRAME_IDENTITY_FAILED_URL}"></iframe>
+<script>
+	// The shadow root is attached, and its frames created, synchronously
+	// here rather than on \`load\`: they have to exist before the page
+	// settles, because what they are here to disturb is the *ordering*
+	// every other frame is numbered in. The root sits between the
+	// same-origin and the cross-origin frame precisely so that a numbering
+	// which counts its frames and one which does not cannot agree about
+	// anything after it.
+	//
+	// Two of them, one per origin: whether a shadow frame can be identified
+	// at all has a different answer when its parent can reach it through
+	// \`frameElement\` than when it cannot.
+	document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML =
+		'<p>in shadow</p>' +
+		'<iframe id="in-shadow" src="${origin}/firefox/identity/in-shadow.html"></iframe>' +
+		'<iframe id="in-shadow-cross" src="${crossOrigin}/firefox/identity/in-shadow-cross.html"></iframe>'
+
+	// The one document in this fixture with no URL and no markup of its
+	// own: an \`about:blank\` frame its parent writes into, which is the
+	// case a capture exists for and a URL can say nothing about.
+	const blank = document.getElementById('about-blank')
+	try {
+		const blankDocument = blank.contentDocument
+		blankDocument.documentElement.dataset.abFrame = '${marker.aboutBlank}'
+		blankDocument.body.innerHTML = '<p id="framed">ABOUT_BLANK_CONTENT</p>'
+	} catch (error) {
+		blank.dataset.setupError = String(error)
+	}
+
+	addEventListener('load', () => { document.title = '${FRAME_IDENTITY_READY_TITLE}' })
+</script>
+</body>
+</html>
+`,
+			},
+		],
+		['/firefox/identity/object.svg', identitySvg(marker.objectSvg)],
+		['/firefox/identity/embed.svg', identitySvg(marker.embedSvg)],
+		['/firefox/identity/same-origin.html', identityDocument(marker.sameOrigin, 'same-origin frame', '<p id="framed">SAME_ORIGIN_CONTENT</p>')],
+		['/firefox/identity/cross-origin.html', identityDocument(marker.crossOrigin, 'cross-origin frame', '<p id="framed">CROSS_ORIGIN_CONTENT</p>')],
+		// Served once, embedded twice, and therefore the only thing in this
+		// fixture that two frames can be confused for each other by.
+		['/firefox/identity/duplicate.html', identityDocument(marker.duplicate, 'duplicate frame', '<p id="framed">DUPLICATE_CONTENT</p>')],
+		[
+			'/firefox/identity/nested-parent.html',
+			identityDocument(
+				marker.nestedParent,
+				'nested parent frame',
+				`<p class="filler">before the nested frames</p>
+<iframe id="nested-same" src="${origin}/firefox/identity/nested-same.html"></iframe>
+<p class="filler">between them</p>
+<iframe id="nested-cross" src="${crossOrigin}/firefox/identity/nested-cross.html"></iframe>`,
+			),
+		],
+		['/firefox/identity/nested-same.html', identityDocument(marker.nestedSame, 'nested same-origin frame', '<p id="framed">NESTED_SAME_CONTENT</p>')],
+		[
+			// Crosses origin a second time, back to where the top document
+			// came from: a parent that cannot read its child, inside a child
+			// its own parent cannot read.
+			'/firefox/identity/nested-cross.html',
+			identityDocument(
+				marker.nestedCross,
+				'nested cross-origin frame',
+				`<p id="framed">NESTED_CROSS_CONTENT</p>\n<iframe id="nested-deep" src="${origin}/firefox/identity/nested-deep.html"></iframe>`,
+			),
+		],
+		['/firefox/identity/nested-deep.html', identityDocument(marker.nestedDeep, 'nested deep frame', '<p id="framed">NESTED_DEEP_CONTENT</p>')],
+		['/firefox/identity/sandboxed.html', identityDocument(marker.sandboxed, 'sandboxed frame', '<p id="framed">SANDBOXED_CONTENT</p>')],
+		['/firefox/identity/in-shadow.html', identityDocument(marker.inShadow, 'frame in a shadow root', '<p id="framed">IN_SHADOW_CONTENT</p>')],
+		['/firefox/identity/in-shadow-cross.html', identityDocument(marker.inShadowCross, 'cross-origin frame in a shadow root', '<p id="framed">IN_SHADOW_CROSS_CONTENT</p>')],
+		[
+			'/firefox/identity/in-declarative-shadow.html',
+			identityDocument(marker.inDeclarativeShadow, 'frame in a declarative shadow root', '<p id="framed">IN_DECLARATIVE_SHADOW_CONTENT</p>'),
+		],
+		[
+			// A frameset document, which cannot be part of any other page:
+			// `<frameset>` replaces `<body>`. Its own `load` fires once both
+			// frames have, which is what the ready title reports.
+			FRAME_IDENTITY_FRAMESET_PATH,
+			{
+				contentType: 'text/html; charset=utf-8',
+				body: `<!doctype html>
+<html lang="en" data-ab-frame="${marker.framesetTop}">
+<head><meta charset="utf-8"><title>ArchiveBridge frameset fixture</title>
+<script>addEventListener('load', () => { document.title = '${FRAME_IDENTITY_FRAMESET_READY_TITLE}' })</script>
+</head>
+<frameset cols="50%,50%">
+<frame id="frameset-a" src="${origin}/firefox/identity/frameset-a.html">
+<frame id="frameset-b" src="${origin}/firefox/identity/frameset-b.html">
+</frameset>
+</html>
+`,
+			},
+		],
+		['/firefox/identity/frameset-a.html', identityDocument(marker.framesetA, 'frameset frame a', '<p id="framed">FRAMESET_A_CONTENT</p>')],
+		['/firefox/identity/frameset-b.html', identityDocument(marker.framesetB, 'frameset frame b', '<p id="framed">FRAMESET_B_CONTENT</p>')],
+	])
+}
+
 /** Path -> body/content type. The main page's `load` handler renames the document so a test can wait for a fully settled page before capturing. */
 function pages(mainOrigin: string, crossOrigin: string): ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> {
 	return new Map([
@@ -570,6 +805,7 @@ function pages(mainOrigin: string, crossOrigin: string): ReadonlyMap<string, { r
 		['/image.png', { contentType: 'image/png', body: imageBytes }],
 		...viewerPages(mainOrigin),
 		...firefoxPages(mainOrigin, crossOrigin),
+		...frameIdentityPages(mainOrigin, crossOrigin),
 	])
 }
 
