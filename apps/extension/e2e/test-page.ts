@@ -756,6 +756,208 @@ function frameIdentityPages(origin: string, crossOrigin: string): ReadonlyMap<st
 	])
 }
 
+/**
+ * The fixture the Firefox **document identity** probe measures, at
+ * {@link DOCUMENT_IDENTITY_PATH}.
+ *
+ * `FRAME_IDENTITY_PATH` measures which *browsing context* a captured
+ * document belongs to. This one measures a different question that the
+ * frame-identity answer cannot reach: whether the document captured out of
+ * that browsing context is **still the document the container holds** when
+ * the parent is serialized afterwards. A frame id names a frame for as long
+ * as the frame exists; a frame that navigates keeps it while replacing its
+ * Document underneath. So the hostile sequence this fixture exists to
+ * reproduce is not a DOM mutation at all:
+ *
+ * ```text
+ *   capture child document A out of frame 42
+ *   the page navigates frame 42 to document B
+ *   serialize the parent; its container still reports frame 42
+ *   attach A to a container now holding B          ← silently wrong
+ * ```
+ *
+ * Every container here is therefore one that **keeps its element identity
+ * across a navigation** — the test holds a direct node reference in the
+ * page's own world and re-checks it afterwards, so "same container" is a
+ * measured fact rather than an assumption about `id` attributes. What
+ * varies between them is the document-identity case each one covers:
+ *
+ * - `#nav-same` — the plain race: same-origin A replaced by same-origin B.
+ * - `#nav-cross` — the same race across an **origin transition**, since a
+ *   document's identity must not be something only a same-origin parent can
+ *   read.
+ * - `#nav-sandbox` — a `sandbox=""` container, whose documents have opaque
+ *   origins and cannot be reached through `contentDocument` at all.
+ * - `#nav-srcdoc` — a `srcdoc` document, which has no URL of its own,
+ *   replaced by one that does.
+ * - `#nav-blank` — an `about:blank` document **written by its parent**,
+ *   replaced by a loaded one. This is the case a capture exists for and the
+ *   case a URL can say nothing whatsoever about: before the navigation the
+ *   container's `src` is absent and the child's URL is `about:blank`.
+ * - `#nav-shadow` — a container inside an **open shadow root**, which
+ *   `document.querySelectorAll` cannot see and `parent.frames` does not
+ *   index.
+ * - `#same-doc` — the **control**, and the reason the others mean anything:
+ *   a fragment navigation and a `history.pushState()` change this frame's
+ *   URL without creating a new Document, and a reload creates one at the
+ *   *same* URL. An identity that tracked URLs rather than Document lifetime
+ *   would get all three backwards.
+ * - `#cross-static` and the `#nested-parent` tree (cross origin, then back
+ *   to the first origin at depth 3) — never navigated, so they measure that
+ *   a document identity is stable for documents that did **not** move, and
+ *   that a child can name its parent *document* across origin boundaries.
+ *
+ * Each document names itself in `data-ab-frame`, exactly as the
+ * frame-identity fixture does, so a probe identifies which document
+ * answered by what it is rather than by a URL it was expected at — URL
+ * equality is the thing being avoided, and may never be the thing doing
+ * the identifying.
+ */
+export const DOCUMENT_IDENTITY_PATH = '/firefox/document-identity.html'
+
+/** What {@link DOCUMENT_IDENTITY_PATH} renames itself to once every frame it owns has settled. */
+export const DOCUMENT_IDENTITY_READY_TITLE = 'document identity ready'
+
+/**
+ * The documents {@link DOCUMENT_IDENTITY_PATH} starts with and navigates
+ * to. Served on **both** of the test server's origins, so a test picks the
+ * origin and thereby whether a navigation crosses one; the `cross-b`
+ * navigation is the same path fetched from the other hostname.
+ */
+export const DOCUMENT_IDENTITY_DOCS = {
+	sameA: '/firefox/document-identity/same-a.html',
+	sameB: '/firefox/document-identity/same-b.html',
+	crossA: '/firefox/document-identity/cross-a.html',
+	crossB: '/firefox/document-identity/cross-b.html',
+	sandboxA: '/firefox/document-identity/sandbox-a.html',
+	sandboxB: '/firefox/document-identity/sandbox-b.html',
+	shadowA: '/firefox/document-identity/shadow-a.html',
+	shadowB: '/firefox/document-identity/shadow-b.html',
+	srcdocB: '/firefox/document-identity/srcdoc-b.html',
+	blankB: '/firefox/document-identity/blank-b.html',
+	sameDoc: '/firefox/document-identity/same-doc.html',
+	crossStatic: '/firefox/document-identity/cross-static.html',
+	nestedParent: '/firefox/document-identity/nested-parent.html',
+	nestedCross: '/firefox/document-identity/nested-cross.html',
+	nestedDeep: '/firefox/document-identity/nested-deep.html',
+} as const
+
+/** The marker each fixture document carries in `data-ab-frame`. A navigation is confirmed by the *replacement document naming itself*, never by the container's URL having changed. */
+export const DOCUMENT_IDENTITY_MARKERS = {
+	top: 'doc-top',
+	sameA: 'doc-same-a',
+	sameB: 'doc-same-b',
+	crossA: 'doc-cross-a',
+	crossB: 'doc-cross-b',
+	sandboxA: 'doc-sandbox-a',
+	sandboxB: 'doc-sandbox-b',
+	shadowA: 'doc-shadow-a',
+	shadowB: 'doc-shadow-b',
+	srcdocA: 'doc-srcdoc-a',
+	srcdocB: 'doc-srcdoc-b',
+	blankA: 'doc-blank-a',
+	blankB: 'doc-blank-b',
+	sameDoc: 'doc-same-doc',
+	crossStatic: 'doc-cross-static',
+	nestedParent: 'doc-nested-parent',
+	nestedCross: 'doc-nested-cross',
+	nestedDeep: 'doc-nested-deep',
+} as const
+
+function documentIdentityPages(origin: string, crossOrigin: string): ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> {
+	const marker = DOCUMENT_IDENTITY_MARKERS
+	const doc = DOCUMENT_IDENTITY_DOCS
+	return new Map([
+		[
+			DOCUMENT_IDENTITY_PATH,
+			{
+				contentType: 'text/html; charset=utf-8',
+				body: `<!doctype html>
+<html lang="en" data-ab-frame="${marker.top}">
+<head><meta charset="utf-8"><title>ArchiveBridge document identity fixture</title></head>
+<body>
+<h1 id="heading">Document identity fixture</h1>
+<p class="filler">DOCUMENT_IDENTITY_CONTENT</p>
+<iframe id="nav-same" src="${origin}${doc.sameA}"></iframe>
+<p class="filler">between the same-origin navigable frame and the cross-origin one</p>
+<iframe id="nav-cross" src="${origin}${doc.crossA}"></iframe>
+<p class="filler">before the sandboxed navigable frame</p>
+<iframe id="nav-sandbox" sandbox="" src="${origin}${doc.sandboxA}"></iframe>
+<p class="filler">before the two frames with no URL of their own</p>
+<iframe id="nav-srcdoc" srcdoc='<!doctype html><html lang="en" data-ab-frame="${marker.srcdocA}"><head><meta charset="utf-8"><title>srcdoc before</title></head><body><p id="framed">SRCDOC_A_CONTENT</p></body></html>'></iframe>
+<iframe id="nav-blank"></iframe>
+<p class="filler">before the shadow root</p>
+<div id="shadow-host"></div>
+<p class="filler">before the same-document control</p>
+<iframe id="same-doc" src="${origin}${doc.sameDoc}"></iframe>
+<p class="filler">before the frames that are never navigated</p>
+<iframe id="cross-static" src="${crossOrigin}${doc.crossStatic}"></iframe>
+<iframe id="nested-parent" src="${origin}${doc.nestedParent}"></iframe>
+<script>
+	// Attached synchronously, before the page settles: a container inside a
+	// shadow root has to be present for the baseline pass, because what it
+	// is here to show is that a *navigation* of such a container is
+	// observable from the parent's side even though the container is
+	// invisible to \`document.querySelectorAll\` and its browsing context is
+	// absent from \`parent.frames\`.
+	document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML =
+		'<p>in shadow</p><iframe id="nav-shadow" src="${origin}${doc.shadowA}"></iframe>'
+
+	// The one document here with no URL and no markup of its own. Its
+	// replacement is an ordinary loaded document, so this container spans
+	// the widest gap the fixture contains: from a parent-written
+	// \`about:blank\` with no \`src\` attribute at all, to a real URL.
+	const blank = document.getElementById('nav-blank')
+	try {
+		const blankDocument = blank.contentDocument
+		blankDocument.documentElement.dataset.abFrame = '${marker.blankA}'
+		blankDocument.body.innerHTML = '<p id="framed">BLANK_A_CONTENT</p>'
+	} catch (error) {
+		blank.dataset.setupError = String(error)
+	}
+
+	addEventListener('load', () => { document.title = '${DOCUMENT_IDENTITY_READY_TITLE}' })
+</script>
+</body>
+</html>
+`,
+			},
+		],
+		[doc.sameA, identityDocument(marker.sameA, 'same-origin before', '<p id="framed">SAME_A_CONTENT</p>')],
+		[doc.sameB, identityDocument(marker.sameB, 'same-origin after', '<p id="framed">SAME_B_CONTENT</p>')],
+		[doc.crossA, identityDocument(marker.crossA, 'origin transition before', '<p id="framed">CROSS_A_CONTENT</p>')],
+		[doc.crossB, identityDocument(marker.crossB, 'origin transition after', '<p id="framed">CROSS_B_CONTENT</p>')],
+		[doc.sandboxA, identityDocument(marker.sandboxA, 'sandboxed before', '<p id="framed">SANDBOX_A_CONTENT</p>')],
+		[doc.sandboxB, identityDocument(marker.sandboxB, 'sandboxed after', '<p id="framed">SANDBOX_B_CONTENT</p>')],
+		[doc.shadowA, identityDocument(marker.shadowA, 'shadow-hosted before', '<p id="framed">SHADOW_A_CONTENT</p>')],
+		[doc.shadowB, identityDocument(marker.shadowB, 'shadow-hosted after', '<p id="framed">SHADOW_B_CONTENT</p>')],
+		[doc.srcdocB, identityDocument(marker.srcdocB, 'srcdoc replacement', '<p id="framed">SRCDOC_B_CONTENT</p>')],
+		[doc.blankB, identityDocument(marker.blankB, 'about:blank replacement', '<p id="framed">BLANK_B_CONTENT</p>')],
+		// The control. Its fragment and `pushState` operations change this
+		// document's URL without replacing the Document, and its reload
+		// replaces the Document without changing the URL — so an identity
+		// that tracked URLs would disagree with it in both directions.
+		[doc.sameDoc, identityDocument(marker.sameDoc, 'same-document control', '<p id="framed">SAME_DOC_CONTENT</p>\n<p id="fragment-target">FRAGMENT_TARGET</p>')],
+		[doc.crossStatic, identityDocument(marker.crossStatic, 'cross-origin never navigated', '<p id="framed">CROSS_STATIC_CONTENT</p>')],
+		[
+			doc.nestedParent,
+			identityDocument(
+				marker.nestedParent,
+				'nested parent',
+				`<p class="filler">before the nested cross-origin frame</p>\n<iframe id="nested-cross" src="${crossOrigin}${doc.nestedCross}"></iframe>`,
+			),
+		],
+		[
+			// Crosses origin, then back to the first origin: a parent that
+			// cannot read its child, inside a child its own parent cannot
+			// read. Whether a child can name its parent *document* across
+			// that boundary is the question §2 of the research note asks.
+			doc.nestedCross,
+			identityDocument(marker.nestedCross, 'nested cross-origin', `<p id="framed">NESTED_CROSS_CONTENT</p>\n<iframe id="nested-deep" src="${origin}${doc.nestedDeep}"></iframe>`),
+		],
+		[doc.nestedDeep, identityDocument(marker.nestedDeep, 'nested deep', '<p id="framed">NESTED_DEEP_CONTENT</p>')],
+	])
+}
 /** Path -> body/content type. The main page's `load` handler renames the document so a test can wait for a fully settled page before capturing. */
 function pages(mainOrigin: string, crossOrigin: string): ReadonlyMap<string, { readonly contentType: string; readonly body: string | Buffer }> {
 	return new Map([
@@ -806,6 +1008,7 @@ function pages(mainOrigin: string, crossOrigin: string): ReadonlyMap<string, { r
 		...viewerPages(mainOrigin),
 		...firefoxPages(mainOrigin, crossOrigin),
 		...frameIdentityPages(mainOrigin, crossOrigin),
+		...documentIdentityPages(mainOrigin, crossOrigin),
 	])
 }
 
